@@ -1,8 +1,8 @@
-name: Notion Employee Totals (every 30 min)
+name: Notion Employee Totals (every 5 min)
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # كل 30 دقيقة (UTC)
+    - cron: "*/5 * * * *"    # كل 5 دقيقة (UTC)
   workflow_dispatch:         # تقدر تشغّله يدويًا أيضًا
 
 jobs:
