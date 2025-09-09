@@ -1,0 +1,33 @@
+name: Notion manual run
+
+on:
+  workflow_dispatch:   # تشغيل يدوي فقط
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          # مفتاح Notion (استخدم واحد فقط)
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+
+          # مكان كتابة النتائج (استخدم واحد فقط)
+          EMP_TOTALS_DB_ID: ${{ secrets.EMP_TOTALS_DB_ID }}
+          EMP_TOTALS_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+
+          # (اختياري) لو جعلت ID المشاريع من env
+          RAW_PROJECTS_DB_ID: ${{ vars.RAW_PROJECTS_DB_ID }}
+        run: python main.py
