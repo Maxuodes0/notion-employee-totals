@@ -1,4 +1,4 @@
-name: Notion manual run
+name: Notion manual run to Test Codes 
 
 on:
   workflow_dispatch:   # تشغيل يدوي فقط
@@ -30,4 +30,4 @@ jobs:
 
           # (اختياري) لو جعلت ID المشاريع من env
           RAW_PROJECTS_DB_ID: ${{ vars.RAW_PROJECTS_DB_ID }}
-        run: python main.py
+        run: python project_profit.py
