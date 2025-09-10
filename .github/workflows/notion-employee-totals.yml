@@ -1,9 +1,9 @@
-name: Notion Employee Totals (every 60 min)
+name: Notion قواعد البيانات (every 60 min)
 
 on:
   schedule:
-    - cron: "*/60 * * * *"    # كل 5 دقيقة (UTC)
-  workflow_dispatch:         # تقدر تشغّله يدويًا أيضًا
+    - cron: "0 * * * *"       # كل 60 دقيقة (على الدقيقة 00) بتوقيت UTC
+  workflow_dispatch:          # تشغيل يدوي
 
 jobs:
   run:
@@ -30,27 +30,38 @@ jobs:
             pip install requests
           fi
 
+      # 1) تجميع مبالغ الموظفين
       - name: Run main.py
         env:
-          # موجودة عندك كـ Secrets حسب الصورة
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           EMP_TOTALS_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
-
-          # (اختياري) إذا حاطّه كـ Variable
           PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
-
-          # لتفادي رسالة "This API is deprecated"
           NOTION_VERSION: "2025-09-03"
-
-          # (اختياري) لو تبي تمنع الإنشاء وتكتب على قاعدة معيّنة فقط:
+          # لو تبي يمنع الإنشاء ويكتب على DB معيّنة:
           # EMP_TOTALS_DB_ID: ${{ vars.EMP_TOTALS_DB_ID }}
         run: |
-          python main.py | tee run.log
+          python main.py | tee run_main.log
+
+      # 2) ربحية المشاريع = (قيمة بدون ضريبة) - (مجموع التكاليف)
+      - name: Run project_profit.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
+          # خلّينا قاعدة الربحية تُنشأ تحت نفس صفحة الأم:
+          PROFIT_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+          NOTION_VERSION: "2025-09-03"
+          VAT_RATE: "0.15"   # غيّرها لو نسبة الضريبة عندك غير 15%
+          # أو لو عندك قاعدة ربحية جاهزة وتبغى الكتابة عليها مباشرة:
+          # PROFIT_DB_ID: ${{ vars.PROFIT_DB_ID }}
+        run: |
+          python project_profit.py | tee run_profit.log
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: notion-employee-totals-logs
-          path: run.log
+          path: |
+            run_main.log
+            run_profit.log
           retention-days: 7
