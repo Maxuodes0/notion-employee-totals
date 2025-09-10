@@ -1,24 +1,26 @@
 # project_profit.py — ربحية المشاريع = (قيمة بدون ضريبة) - (مجموع التكاليف)
 # يقرأ من قواعد فرعية داخل كل مشروع:
 #   1) "قيمة المشروع": عمود "بدون ضريبة" (أو يحوّل من "شامل" إلى "غير شامل" بقسمة على 1+VAT_RATE)
-#   2) "تكاليف المشروع": يجمع عمود التكلفة لكل صف (ولو ما وجد "مجموع التكاليف" كاسم عمود، يختار أفضل عمود رقمي تلقائيًا)
-# ثم يكتب في قاعدة "ربحية المشاريع" (Upsert) مع Relation للمشروع (إن توفّر بال-schema)
+#   2) "تكاليف المشروع": عمود "مجموع التكاليف"
+# ثم يكتب في قاعدة "ربحية المشاريع" (Upsert) مع Relation للمشروع (اختياري لو الصلاحيات تسمح)
 
 import os, re, time, requests
+from collections import defaultdict
 
 # ========= ضع معرّف قاعدة Projects (بشرطات أو بدون) =========
-RAW_PROJECTS_DB_ID = os.getenv("PROJECTS_DB_ID", "23e6fe2a5e8e8003a6bfcf99ae01ba0c")
+RAW_PROJECTS_DB_ID = "23e6fe2a5e8e8003a6bfcf99ae01ba0c"
 # ==========================================================
 
+# أسماء قواعد فرعية داخل صفحة كل مشروع
 VALUE_DB_NAME = "قيمة المشروع"
 COSTS_DB_NAME = "تكاليف المشروع"
 
 # إخراج النتائج
-OUT_DB_ID_ENV  = os.getenv("PROFIT_DB_ID")
+OUT_DB_ID_ENV  = os.getenv("PROFIT_DB_ID")                               # لو موجود يكتب مباشرة فيها
 OUT_PARENT_ENV = os.getenv("PROFIT_PARENT_PAGE_ID") or os.getenv("EMP_TOTALS_PARENT_PAGE_ID")
 OUT_DB_TITLE   = "ربحية المشاريع"
 
-# أسماء الأعمدة الافتراضية المتوقعة (سنستخدمها فقط إن كانت موجودة بالschema)
+# أسماء الأعمدة في قاعدة "ربحية المشاريع"
 OUT_TITLE_PROP  = "المشروع"
 OUT_NET_PROP    = "قيمة بدون ضريبة (SAR)"
 OUT_COST_PROP   = "مجموع التكاليف (SAR)"
@@ -27,22 +29,23 @@ OUT_MARGIN_PROP = "الهامش %"
 OUT_REL_PROJECT = "رابط المشروع"
 
 DEFAULT_TIMEOUT = 30
-SLEEP = 0.12
-MAX_PROJECTS = None
+SLEEP = 0.15
+MAX_PROJECTS = None  # لو تبغى تحد عدد المشاريع
 
-# كلمات مفتاحية
+# كلمات مفتاحية لاكتشاف الأعمدة
 NET_REV_KEYS    = ["بدون ضريبة","غير شامل","قبل الضريبة","ex vat","ex-vat","pre vat","pre-vat","net"]
 GROSS_REV_KEYS  = ["شامل","شامل الضريبة","بعد الضريبة","with vat","incl vat","inclusive","gross"]
-COST_TOTAL_KEYS = ["مجموع التكاليف","إجمالي التكاليف","اجمالي التكاليف","total cost","overall cost","sum cost"]
-COST_ITEM_HINTS = ["التكلفة","cost","amount","قيمة","price","سعر","رسوم","مصروف","expense"]
+COST_TOTAL_KEYS = ["مجموع التكاليف","إجمالي التكاليف","محموع التكاليف","اجمالي التكاليف","total cost","overall cost","sum cost"]
 
+# نسبة الضريبة لتحويل الشامل إلى غير شامل عند الحاجة
 VAT_RATE = float(os.getenv("VAT_RATE", "0.15"))
 
 # ===== Notion =====
 API_KEY = os.getenv("NOTION_API_KEY") or os.getenv("NOTION_TOKEN")
 assert API_KEY, "🚫 أضف NOTION_API_KEY أو NOTION_TOKEN في Secrets."
 
-NOTION_VERSION = "2022-06-28"  # ثابتة وآمنة (نفس main.py)
+# ✅ FIX: Use a stable, known-good API version
+NOTION_VERSION = "2022-06-28"  # Fixed to a stable version
 print(f"🔧 Using Notion API version: {NOTION_VERSION}")
 
 HDRS = {
@@ -59,7 +62,7 @@ def http_patch(url, json=None):
     r = requests.patch(url, headers=HDRS, json=json or {}, timeout=DEFAULT_TIMEOUT); r.raise_for_status(); return r
 
 def hyphenate(nid: str) -> str:
-    nid = (nid or "").strip()
+    nid = nid.strip()
     if "-" in nid: return nid
     if re.fullmatch(r"[0-9a-fA-F]{32}", nid):
         return f"{nid[0:8]}-{nid[8:12]}-{nid[12:16]}-{nid[16:20]}-{nid[20:32]}"
@@ -71,26 +74,56 @@ def retrieve_database(db_id):  return http_get(f"https://api.notion.com/v1/datab
 def retrieve_page(page_id):    return http_get(f"https://api.notion.com/v1/pages/{page_id}").json()
 
 def query_database_pages(db_id, page_size=100, limit=None, filter_payload=None):
+    """Fixed query function with better error handling"""
     url = f"https://api.notion.com/v1/databases/{db_id}/query"
     res, cursor = [], None
+    
     while True:
-        body = {"page_size": min(page_size, 100)}
-        if cursor: body["start_cursor"] = cursor
+        # Build minimal, safe request body
+        body = {"page_size": min(page_size, 100)}  # Notion max is 100
+        
+        if cursor: 
+            body["start_cursor"] = cursor
+        
+        # Only add filter if properly structured
         if filter_payload and isinstance(filter_payload, dict):
-            if "filter" in filter_payload: body["filter"] = filter_payload["filter"]
-            if "sorts"  in filter_payload: body["sorts"]  = filter_payload["sorts"]
-        print(f"📤 Querying database: {db_id[:8]}...")
-        resp = requests.post(url, headers=HDRS, json=body, timeout=DEFAULT_TIMEOUT)
-        if resp.status_code != 200:
-            print(f"❌ Query failed: {resp.status_code}\n❌ Response: {resp.text}")
-            resp.raise_for_status()
-        data = resp.json()
-        chunk = data.get("results", [])
-        res.extend(chunk)
-        print(f"📊 Retrieved {len(chunk)} pages (total: {len(res)})")
-        if limit and len(res) >= limit: return res[:limit]
-        if not data.get("has_more"): break
-        cursor = data.get("next_cursor"); time.sleep(SLEEP)
+            if "filter" in filter_payload:
+                body["filter"] = filter_payload["filter"]
+            if "sorts" in filter_payload:
+                body["sorts"] = filter_payload["sorts"]
+        
+        try:
+            print(f"📤 Querying database: {db_id[:8]}...")
+            response = requests.post(url, headers=HDRS, json=body, timeout=DEFAULT_TIMEOUT)
+            
+            if response.status_code != 200:
+                print(f"❌ Query failed: {response.status_code}")
+                print(f"❌ Response: {response.text}")
+                response.raise_for_status()
+            
+            data = response.json()
+            results = data.get("results", [])
+            res.extend(results)
+            
+            print(f"📊 Retrieved {len(results)} pages (total: {len(res)})")
+            
+            if limit and len(res) >= limit: 
+                return res[:limit]
+                
+            if not data.get("has_more"): 
+                break
+                
+            cursor = data.get("next_cursor")
+            if cursor:
+                time.sleep(SLEEP)
+            
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Request error: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"❌ Status: {e.response.status_code}")
+                print(f"❌ Text: {e.response.text}")
+            raise
+    
     return res
 
 def list_block_children_all(block_id):
@@ -140,8 +173,8 @@ def extract_number_cell(prop):
                 if it.get("type") == "number":
                     total += float(it.get("number") or 0)
                 elif it.get("type") == "formula":
-                    n = (it.get("formula") or {}).get("number")
-                    if n is not None: total += float(n)
+                    fn = (it.get("formula") or {}).get("number")
+                    if fn is not None: total += float(fn)
             return total
     return 0.0
 
@@ -154,39 +187,8 @@ def sum_numeric_column(db_id, col_name):
         total += extract_number_cell(cell)
     return round(total, 2)
 
-def pick_best_numeric_column(db_id, hints=None):
-    """لو ما وجد عمود ‘مجموع التكاليف’، اختَر أفضل عمود رقمي (أعلى مجموع)."""
-    db = retrieve_database(db_id); props = db.get("properties", {}) or {}
-    cands = [n for n,m in props.items() if m.get("type") in ("number","formula","rollup")]
-    # لو فيه تلميحات (مثل "التكلفة") خلها أولاً
-    ordered = []
-    if hints:
-        for n in cands:
-            low = n.lower()
-            if any(h.lower() in low for h in hints):
-                ordered.append(n)
-        ordered += [n for n in cands if n not in ordered]
-    else:
-        ordered = cands[:]
-
-    best, best_sum = None, 0.0
-    for name in ordered:
-        s = sum_numeric_column(db_id, name)
-        if s > best_sum:
-            best, best_sum = name, s
-    return best, best_sum
-
-# ===== قاعدة المخرجات: التعامل الذكي مع الـschema =====
-def get_db_schema(db_id):
-    db = retrieve_database(db_id)
-    props = db.get("properties", {}) or {}
-    title_prop = None
-    for n, m in props.items():
-        if m.get("type") == "title":
-            title_prop = n; break
-    return props, title_prop
-
-def create_output_db_under_page(parent_page_id: str, projects_db_id_for_relation: str) -> str:
+# ===== إنشاء/التحقق من قاعدة النتائج =====
+def create_output_db_under_page(parent_page_id: str) -> str:
     payload = {
         "parent": {"type": "page_id", "page_id": parent_page_id},
         "title": [{"type":"text","text":{"content": OUT_DB_TITLE}}],
@@ -196,14 +198,14 @@ def create_output_db_under_page(parent_page_id: str, projects_db_id_for_relation
             OUT_COST_PROP:   {"number": {}},
             OUT_PROFIT_PROP: {"number": {}},
             OUT_MARGIN_PROP: {"number": {}},
-            OUT_REL_PROJECT: {"relation": {"database_id": projects_db_id_for_relation}},
+            OUT_REL_PROJECT: {"relation": {"database_id": PROJECTS_DB_ID}},
         }
     }
     data = http_post("https://api.notion.com/v1/databases", payload).json()
     print(f"🆕 أنشأنا قاعدة الربحية: {data.get('id')}")
     return data.get("id")
 
-def ensure_output_db(projects_db_id_for_relation: str) -> str:
+def ensure_output_db() -> str:
     if OUT_DB_ID_ENV:
         print(f"🔗 استخدام قاعدة موجودة PROFIT_DB_ID={OUT_DB_ID_ENV}")
         return hyphenate(OUT_DB_ID_ENV)
@@ -214,13 +216,13 @@ def ensure_output_db(projects_db_id_for_relation: str) -> str:
         print(f"🔎 وجدنا قاعدة الربحية داخل الصفحة: {existing}")
         return existing
     print("➕ إنشاء قاعدة الربحية داخل صفحة الأم…")
-    return create_output_db_under_page(parent_id, projects_db_id_for_relation)
+    return create_output_db_under_page(parent_id)
 
-def ensure_output_columns(db_id: str, projects_db_id_for_relation: str):
+def ensure_output_columns(db_id: str):
     db = retrieve_database(db_id); props = db.get("properties", {}) or {}
     patch = {"properties": {}}
     if OUT_REL_PROJECT not in props:
-        patch["properties"][OUT_REL_PROJECT] = {"relation": {"database_id": projects_db_id_for_relation}}
+        patch["properties"][OUT_REL_PROJECT] = {"relation": {"database_id": PROJECTS_DB_ID}}
     for name in (OUT_TITLE_PROP, OUT_NET_PROP, OUT_COST_PROP, OUT_PROFIT_PROP, OUT_MARGIN_PROP):
         if name not in props:
             if name == OUT_TITLE_PROP: patch["properties"][name] = {"title": {}}
@@ -231,65 +233,55 @@ def ensure_output_columns(db_id: str, projects_db_id_for_relation: str):
             print("🔧 تأكدنا من أعمدة الربحية (أضفنا الناقص).")
         except requests.HTTPError as e:
             print("⚠️ تعذّر تعديل خصائص القاعدة (غالبًا علاقات/صلاحيات):", e)
-            try:
-                print("↪️ PATCH response:", e.response.status_code, e.response.text)
-            except: pass
 
-def build_props_for_row(rec, available_props, title_prop_name):
-    props = {}
-    # عنوان
-    props[title_prop_name] = {"title":[{"type":"text","text":{"content": rec["name"]}}]}
-    # أرقام إذا موجودة
-    if OUT_NET_PROP in available_props:    props[OUT_NET_PROP]    = {"number": rec["net_revenue"]}
-    else: print(f"⚠️ مفقود في القاعدة: {OUT_NET_PROP}")
-    if OUT_COST_PROP in available_props:   props[OUT_COST_PROP]   = {"number": rec["total_cost"]}
-    else: print(f"⚠️ مفقود في القاعدة: {OUT_COST_PROP}")
-    if OUT_PROFIT_PROP in available_props: props[OUT_PROFIT_PROP] = {"number": rec["profit"]}
-    else: print(f"⚠️ مفقود في القاعدة: {OUT_PROFIT_PROP}")
-    if OUT_MARGIN_PROP in available_props: props[OUT_MARGIN_PROP] = {"number": rec["margin_pct"]}
-    else: print(f"⚠️ مفقود في القاعدة: {OUT_MARGIN_PROP}")
-    # Relation اختياري
-    if OUT_REL_PROJECT in available_props:
-        props[OUT_REL_PROJECT] = {"relation": [{"id": rec["project_id"]}]}
-    else:
-        print(f"⚠️ مفقود في القاعدة (اختياري): {OUT_REL_PROJECT}")
-    return props
-
-def get_existing_rows_map(db_id: str, title_prop_name: str):
+def get_existing_rows_map(db_id: str):
     pages = query_database_pages(db_id, page_size=100)
     m = {}
     for p in pages:
         props = p.get("properties", {})
-        if title_prop_name in props and props[title_prop_name].get("title"):
-            name = props[title_prop_name]["title"][0].get("plain_text","")
+        if OUT_TITLE_PROP in props and props[OUT_TITLE_PROP].get("title"):
+            name = props[OUT_TITLE_PROP]["title"][0].get("plain_text","")
         else:
             name = title_from_page(p)
         m[name] = {"id": p["id"]}
     return m
 
-def create_result_row(db_id: str, rec, available_props, title_prop_name):
+def create_result_row(db_id: str, rec):
     payload = {
         "parent": {"database_id": db_id},
-        "properties": build_props_for_row(rec, available_props, title_prop_name)
+        "properties": {
+            OUT_TITLE_PROP:  {"title":[{"type":"text","text":{"content": rec["name"]}}]},
+            OUT_NET_PROP:    {"number": rec["net_revenue"]},
+            OUT_COST_PROP:   {"number": rec["total_cost"]},
+            OUT_PROFIT_PROP: {"number": rec["profit"]},
+            OUT_MARGIN_PROP: {"number": rec["margin_pct"]},
+            OUT_REL_PROJECT: {"relation": [{"id": rec["project_id"]}]},
+        }
     }
     http_post("https://api.notion.com/v1/pages", payload)
 
-def update_result_row(page_id: str, rec, available_props, title_prop_name):
-    payload = {"properties": build_props_for_row(rec, available_props, title_prop_name)}
+def update_result_row(page_id: str, rec):
+    payload = {
+        "properties": {
+            OUT_TITLE_PROP:  {"title":[{"type":"text","text":{"content": rec["name"]}}]},
+            OUT_NET_PROP:    {"number": rec["net_revenue"]},
+            OUT_COST_PROP:   {"number": rec["total_cost"]},
+            OUT_PROFIT_PROP: {"number": rec["profit"]},
+            OUT_MARGIN_PROP: {"number": rec["margin_pct"]},
+            OUT_REL_PROJECT: {"relation": [{"id": rec["project_id"]}]},
+        }
+    }
     http_patch(f"https://api.notion.com/v1/pages/{page_id}", payload)
 
 def upsert_bulk(db_id: str, records):
-    props, title_prop_name = get_db_schema(db_id)
-    assert title_prop_name, "🚫 قاعدة الربحية لا تحتوي عمود Title."
-    existing = get_existing_rows_map(db_id, title_prop_name)
-    available_props = set(props.keys())
+    existing = get_existing_rows_map(db_id)
     creates, updates = 0, 0
     for rec in records:
         ex = existing.get(rec["name"])
-        if ex: update_result_row(ex["id"], rec, available_props, title_prop_name); updates += 1
-        else:   create_result_row(db_id, rec, available_props, title_prop_name);   creates += 1
+        if ex: update_result_row(ex["id"], rec); updates += 1
+        else: create_result_row(db_id, rec); creates += 1
         time.sleep(SLEEP)
-    print(f"✅ Profit upsert: {creates} إنشاء | {updates} تحديث")
+    print(f"✅ تم: {creates} إنشاء | {updates} تحديث")
 
 # ======== الحساب والكتابة ========
 def aggregate_and_write():
@@ -298,10 +290,6 @@ def aggregate_and_write():
     print(f"✅ Projects DB: {projects_db.get('title',[{}])[0].get('plain_text','(No title)')}")
     projects = query_database_pages(PROJECTS_DB_ID, page_size=100, limit=MAX_PROJECTS)
     print(f"📦 عدد المشاريع: {len(projects)}")
-
-    # جهّز قاعدة المخرجات
-    out_db_id = ensure_output_db(PROJECTS_DB_ID)
-    ensure_output_columns(out_db_id, PROJECTS_DB_ID)
 
     records = []
 
@@ -320,18 +308,10 @@ def aggregate_and_write():
             net_col   = detect_number_prop_by_keywords(value_db_id, NET_REV_KEYS)
             gross_col = detect_number_prop_by_keywords(value_db_id, GROSS_REV_KEYS)
             if net_col:
-                print(f"  [VALUE] using column: {net_col}")
                 net_revenue = sum_numeric_column(value_db_id, net_col)
             elif gross_col:
-                print(f"  [VALUE] using gross column: {gross_col} → convert / (1+VAT)")
                 gross = sum_numeric_column(value_db_id, gross_col)
                 net_revenue = round(gross / (1.0 + VAT_RATE), 2)
-            else:
-                # اختياري: التقط أفضل عمود رقمي لو ما لقى شيء صريح
-                best, s = pick_best_numeric_column(value_db_id, hints=["قيمة","value","amount","بدون","gross"])
-                if best:
-                    print(f"  [VALUE] fallback column: {best} (sum={s:,.2f}) — treated as Net")
-                    net_revenue = round(s, 2)
         else:
             print("  ⚠️ لا يوجد جدول 'قيمة المشروع'")
 
@@ -339,16 +319,9 @@ def aggregate_and_write():
         if costs_db_id:
             tot_col = detect_number_prop_by_keywords(costs_db_id, COST_TOTAL_KEYS)
             if tot_col:
-                print(f"  [COST] using column: {tot_col} (mode=keyword)")
                 total_cost = sum_numeric_column(costs_db_id, tot_col)
             else:
-                # اجمع أفضل عمود رقمي (عادةً عمود 'التكلفة' لكل صف)
-                best, s = pick_best_numeric_column(costs_db_id, hints=COST_ITEM_HINTS)
-                if best:
-                    print(f"  [COST] using column: {best} (mode=fallback, sum={s:,.2f})")
-                    total_cost = round(s, 2)
-                else:
-                    print("  ⚠️ لم نجد عمود رقمي مناسب داخل 'تكاليف المشروع'")
+                print("  ⚠️ لم نجد عمود 'مجموع التكاليف' في 'تكاليف المشروع'")
         else:
             print("  ⚠️ لا يوجد جدول 'تكاليف المشروع'")
 
@@ -367,7 +340,7 @@ def aggregate_and_write():
         })
         time.sleep(SLEEP)
 
-    upsert_bulk(out_db_id, records)
+    out_db_id = ensure_output_db(); ensure_output_columns(out_db_id); upsert_bulk(out_db_id, records)
     try:
         db_info = retrieve_database(out_db_id); print(f"📄 افتح القاعدة مباشرة: {db_info.get('url')}")
     except: pass
