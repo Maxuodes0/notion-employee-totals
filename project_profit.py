@@ -9,7 +9,7 @@ import os, re, time, requests
 from typing import Optional, List, Dict, Any
 
 # ===== إعدادات عامة =====
-PROJECTS_DB_ID = os.getenv("PROJECTS_DB_ID", "23e6fe2a5e8e8003a6bfcf99ae01ba0c")
+PROJECTS_DB_ID = os.getenv("3c62ed7f54c04235acfeb911dea7f601", "23e6fe2a5e8e8003a6bfcf99ae01ba0c")
 VALUE_DB_NAME  = os.getenv("VALUE_DB_NAME",  "قيمة المشروع")
 COSTS_DB_NAME  = os.getenv("COSTS_DB_NAME",  "تكاليف المشروع")
 
