@@ -34,7 +34,7 @@ MAX_PROJECTS = None  # لو تبغى تحد عدد المشاريع
 
 # كلمات مفتاحية لاكتشاف الأعمدة
 NET_REV_KEYS    = ["بدون ضريبة","غير شامل","قبل الضريبة","ex vat","ex-vat","pre vat","pre-vat","net"]
-GROSS_REV_KEYS  = ["شامل","شامل الضريبة","بعد الضريبة","with vat","incl vat","inclusive","gross"]
+GROSS_REV_KEYS  = ["قيمة المشروع مع الضريبة","شامل الضريبة","بعد الضريبة","with vat","incl vat","inclusive","gross"]
 COST_TOTAL_KEYS = ["مجموع التكاليف","إجمالي التكاليف","محموع التكاليف","اجمالي التكاليف","total cost","overall cost","sum cost"]
 
 # نسبة الضريبة لتحويل الشامل إلى غير شامل عند الحاجة
