@@ -1,25 +1,29 @@
 # project_profit.py — ربح كل مشروع = (قيمة بدون ضريبة) - (مجموع التكاليف)
-# يقرأ من قواعد فرعية داخل كل مشروع:
-#   1) "قيمة المشروع": عمود "بدون ضريبة" (أو يحوّل من شامل إلى غير شامل بقسمة على 1+VAT_RATE)
+# يعتمد فقط على:
+#   1) "قيمة المشروع": عمود "بدون ضريبة" (أو يحوّل من "شامل" إلى "غير شامل" بقسمة على 1+VAT_RATE)
 #   2) "تكاليف المشروع": عمود "مجموع التكاليف"
-# ثم يكتب في قاعدة "ربحية المشاريع" (Upsert بربط Relation بالمشروع)
+# يكتب النتائج في قاعدة "ربحية المشاريع" (Upsert + Relation للمشروع)
 
 from __future__ import annotations
 import os, re, time, requests
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 # ===== إعدادات عامة =====
-PROJECTS_DB_ID = os.getenv("PROJECTS_DB_ID", "23e6fe2a5e8e8003a6bfcf99ae01ba0c")  # غيّرها أو مرّرها من Actions
-VALUE_DB_NAME  = "قيمة المشروع"
-COSTS_DB_NAME  = "تكاليف المشروع"
+PROJECTS_DB_ID = os.getenv("PROJECTS_DB_ID", "23e6fe2a5e8e8003a6bfcf99ae01ba0c")
+VALUE_DB_NAME  = os.getenv("VALUE_DB_NAME",  "قيمة المشروع")
+COSTS_DB_NAME  = os.getenv("COSTS_DB_NAME",  "تكاليف المشروع")
 
 # إعدادات إخراج النتائج
-PROFIT_DB_TITLE        = "ربحية المشاريع"
-PROFIT_DB_ID_ENV       = os.getenv("PROFIT_DB_ID")          # لو موجود يكتب مباشرة فيها
-PROFIT_PARENT_PAGE_ENV = os.getenv("PROFIT_PARENT_PAGE_ID") # وإلا ينشئ/يستخدم قاعدة تحت هذه الصفحة
+PROFIT_DB_TITLE        = os.getenv("PROFIT_DB_TITLE", "ربحية المشاريع")
+PROFIT_DB_ID_ENV       = os.getenv("PROFIT_DB_ID")  # لو موجود يكتب فيها مباشرة
+# fallback تلقائي لصفحة الأم: يفضّل PROFIT_PARENT_PAGE_ID ثم EMP_TOTALS_PARENT_PAGE_ID
+PROFIT_PARENT_PAGE_ENV = os.getenv("PROFIT_PARENT_PAGE_ID") or os.getenv("EMP_TOTALS_PARENT_PAGE_ID")
 
 # ضريبة القيمة المضافة (لو اضطررنا نحول من "شامل" إلى "غير شامل")
 VAT_RATE = float(os.getenv("VAT_RATE", "0.15"))
+
+# تشغيل تجريبي بدون كتابة
+DRY_RUN = os.getenv("DRY_RUN", "0") == "1"
 
 # ===== Notion =====
 API_KEY = os.getenv("NOTION_API_KEY") or os.getenv("NOTION_TOKEN")
@@ -36,9 +40,15 @@ DEFAULT_TIMEOUT = 30
 SLEEP = 0.12
 
 # مفاتيح البحث عن الأعمدة
-NET_REV_KEYS    = ["بدون ضريبة", "قبل الضريبة", "ex vat", "pre vat", "غير شامل", "net"]
-GROSS_REV_KEYS  = ["شامل", "بعد الضريبة", "with vat", "incl vat", "gross"]
-COST_TOTAL_KEYS = ["مجموع التكاليف", "إجمالي التكاليف", "total cost", "overall cost"]
+NET_REV_KEYS = [
+    "بدون ضريبة","غير شامل","قبل الضريبة","غير شامل الضريبة","ex vat","ex-vat","pre vat","pre-vat","net"
+]
+GROSS_REV_KEYS = [
+    "شامل","شامل الضريبة","بعد الضريبة","with vat","incl vat","inclusive","gross"
+]
+COST_TOTAL_KEYS = [
+    "مجموع التكاليف","إجمالي التكاليف","اجمالي التكاليف","total cost","overall cost","sum cost"
+]
 
 # ===== HTTP helpers مع Retries =====
 def _req(method: str, url: str, **kwargs):
@@ -51,7 +61,7 @@ def _req(method: str, url: str, **kwargs):
             return r
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code in (502, 503, 504):
-                time.sleep(0.5 * (2 ** i)); continue
+                time.sleep(min(1.0 * (2 ** i), 8.0)); continue
             raise
     raise RuntimeError("HTTP retries exceeded")
 
@@ -111,29 +121,59 @@ def find_child_db(page_id: str, wanted_title: str) -> Optional[str]:
     return None
 
 def find_named_number_prop(db_id: str, name_keys: List[str]) -> Optional[str]:
-    """يرجع أول عمود رقمي/صيغة/رول-أب اسمه يحتوي أي كلمة من name_keys."""
+    """يرجع أول عمود Number/Formula/Rollup اسمه يحتوي أي كلمة من name_keys."""
     db = retrieve_db(db_id); props = db.get("properties", {}) or {}
+    # نعطي أولوية بالترتيب في القائمة
+    name_keys_lower = [k.lower() for k in name_keys]
+    scored: List[tuple[int,str]] = []
     for n, meta in props.items():
         if meta.get("type") in ("number", "formula", "rollup"):
             nn = (n or "").lower()
-            if any(k.lower() in nn for k in name_keys):
-                return n
-    return None
+            hit = 0
+            for k in name_keys_lower:
+                if k in nn: hit += 1
+            if hit: scored.append((hit, n))
+    if not scored: return None
+    scored.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
+    return scored[0][1]
+
+def _extract_number_from_value(cell: dict) -> float:
+    """يستخرج رقم من خلية Notion (number/formula/rollup[array|number])."""
+    if not cell: return 0.0
+    t = cell.get("type")
+    if t == "number":
+        return float(cell.get("number") or 0)
+    if t == "formula":
+        f = cell.get("formula") or {}
+        if f.get("type") == "number":
+            return float(f.get("number") or 0)
+        return 0.0
+    if t == "rollup":
+        r = cell.get("rollup") or {}
+        rt = r.get("type")
+        if rt == "number":
+            return float(r.get("number") or 0)
+        if rt == "array":
+            total = 0.0
+            for item in r.get("array", []):
+                # item قد يكون title/rich_text/number/formula…
+                it_t = item.get("type")
+                if it_t == "number":
+                    total += float(item.get("number") or 0)
+                elif it_t == "formula":
+                    fn = (item.get("formula") or {}).get("number")
+                    if fn is not None: total += float(fn)
+                # نتجاهل الأنواع غير الرقمية
+            return total
+    # غير مدعوم: نعيد 0
+    return 0.0
 
 def sum_numeric_column(db_id: str, col: str) -> float:
     if not col: return 0.0
     total = 0.0
     for row in query_db(db_id):
         cell = (row.get("properties") or {}).get(col, {})
-        t = cell.get("type")
-        if t == "number":
-            total += float(cell.get("number") or 0)
-        elif t == "formula":
-            total += float((cell.get("formula") or {}).get("number") or 0)
-        elif t == "rollup":
-            r = cell.get("rollup") or {}
-            if r.get("type") == "number":
-                total += float(r.get("number") or 0)
+        total += _extract_number_from_value(cell)
     return round(total, 2)
 
 # ===== إنشاء/كتابة قاعدة "ربحية المشاريع" =====
@@ -164,8 +204,9 @@ def create_profit_db(parent_page_id: str) -> str:
 def get_or_create_profit_db() -> str:
     if PROFIT_DB_ID_ENV:
         return hyphenate(PROFIT_DB_ID_ENV)
-    assert PROFIT_PARENT_PAGE_ENV, "💡 وفّر PROFIT_DB_ID أو PROFIT_PARENT_PAGE_ID."
+    assert PROFIT_PARENT_PAGE_ENV, "💡 وفّر PROFIT_DB_ID أو PROFIT_PARENT_PAGE_ID (أو EMP_TOTALS_PARENT_PAGE_ID)."
     parent = hyphenate(PROFIT_PARENT_PAGE_ENV)
+    # ابحث عن قاعدة موجودة بنفس العنوان
     for b in list_children(parent):
         if b.get("type") == "child_database":
             t = (b.get("child_database") or {}).get("title", "")
@@ -193,6 +234,9 @@ def build_props(rec: dict) -> dict:
     }
 
 def upsert_rows(db_id: str, recs: List[dict]):
+    if DRY_RUN:
+        print("🟡 DRY_RUN=1 → لن نكتب في Notion. طباعة فقط.")
+        return
     existing = get_existing_by_project_relation(db_id)
     creates = updates = 0
     for r in recs:
