@@ -2,7 +2,7 @@ name: Notion قواعد البيانات (every 60 min)
 
 on:
   schedule:
-    - cron: "0 * * * *"       # كل 60 دقيقة (على الدقيقة 00) بتوقيت UTC
+   - cron: "0 22,1,4,7,10,13,16,19 * * *"
   workflow_dispatch:          # تشغيل يدوي
 
 jobs:
