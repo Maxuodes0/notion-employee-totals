@@ -1,4 +1,4 @@
-name: Notion قواعد البيانات (every 60 min)
+name: Notion قواعد البيانات (every 3 Hours)
 
 on:
   schedule:
