@@ -231,7 +231,10 @@ def create_output_db_under_page(parent_page_id: str) -> str:
         "title": [{"type":"text","text":{"content": OUT_DB_TITLE}}],
         "properties": {
             OUT_EMP_PROP: {"rich_text": {}},
-            OUT_PROJECT_PROP: {"relation": {"database_id": PROJECTS_DB_ID}},
+            OUT_PROJECT_PROP: {"relation": {
+                "database_id": PROJECTS_DB_ID,
+                "single_property": {}
+            }},
             OUT_AMOUNT_PROP: {"number": {"format": "riyal"}},
             OUT_STATUS_PROP: {"select": {"options": [
                 {"name": "محول", "color": "green"},
@@ -257,6 +260,31 @@ def ensure_output_db() -> str:
     
     print("➕ إنشاء قاعدة التقرير التفصيلي…")
     return create_output_db_under_page(parent_id)
+
+def ensure_output_columns(db_id: str):
+    """التأكد من وجود الأعمدة المطلوبة (نادراً ما يُستخدم بعد الإنشاء الأول)"""
+    try:
+        db = retrieve_database(db_id)
+        props = db.get("properties", {}) or {}
+        patch = {"properties": {}}
+        
+        # لا نحاول إضافة relation بعد الإنشاء لتجنب مشاكل الصلاحيات
+        # فقط نتأكد من الأعمدة الأساسية الأخرى
+        if OUT_EMP_PROP not in props:
+            patch["properties"][OUT_EMP_PROP] = {"rich_text": {}}
+        if OUT_AMOUNT_PROP not in props:
+            patch["properties"][OUT_AMOUNT_PROP] = {"number": {"format": "riyal"}}
+        if OUT_STATUS_PROP not in props:
+            patch["properties"][OUT_STATUS_PROP] = {"select": {"options": [
+                {"name": "محول", "color": "green"},
+                {"name": "غير محول", "color": "red"}
+            ]}}
+        
+        if patch["properties"]:
+            http_patch(f"https://api.notion.com/v1/databases/{db_id}", patch)
+            print("🔧 تأكدنا من الأعمدة الأساسية.")
+    except Exception as e:
+        print(f"⚠️ تحذير: تعذر التحقق من الأعمدة: {e}")
 
 def clear_existing_rows(db_id: str):
     """مسح جميع الصفوف الموجودة لتجنب التكرار"""
