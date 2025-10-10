@@ -12,11 +12,16 @@ TEAM_DB_NAME = "فريق المشروع"
 OUT_DB_ID_ENV = os.getenv("DETAILED_REPORT_DB_ID")
 OUT_PARENT_ENV = os.getenv("DETAILED_REPORT_PARENT_PAGE_ID")
 
+# معلومات قاعدة التجميع للربط
+TOTALS_DB_ID_ENV = os.getenv("EMP_TOTALS_DB_ID")
+TOTALS_DB_TITLE = "تجميع مبالغ الموظفين"
+
 OUT_DB_TITLE = "تقرير تفصيلي - الموظفين والمشاريع"
 OUT_EMP_PROP = "اسم الموظف"
 OUT_PROJECT_PROP = "المشروع"
 OUT_AMOUNT_PROP = "المبلغ"
 OUT_STATUS_PROP = "حالة التحويل"
+OUT_TOTALS_REL_PROP = "تجميع مبالغ الموظفين"  # عمود الربط
 
 DEFAULT_TIMEOUT = 30
 SLEEP = 0.15
@@ -169,7 +174,56 @@ def extract_rollup_text(cell):
             return (rt[0].get("plain_text") or "").strip() if rt else ""
     return ""
 
-def extract_employee_key(prop):
+def extract_employee_name_from_relation(prop):
+    """استخراج اسم الموظف مباشرة من خلية Relation"""
+    if prop.get("type") == "relation":
+        rel = prop.get("relation", [])
+        if rel:
+            # نحاول نقرأ الاسم من الـ relation object نفسه
+            rel_id = rel[0].get("id")
+            # لو ما في اسم، نرجع الـ ID
+            return rel_id
+    return None
+
+def fetch_relation_page_title(page_id: str):
+    """جلب عنوان الصفحة المرتبطة"""
+    try:
+        page = retrieve_page(page_id)
+        return title_from_page(page)
+    except:
+        return None
+
+def get_totals_db_id():
+    """الحصول على معرّف قاعدة التجميع"""
+    if TOTALS_DB_ID_ENV:
+        return hyphenate(TOTALS_DB_ID_ENV)
+    # محاولة البحث عنها في نفس الصفحة
+    if OUT_PARENT_ENV:
+        parent_id = hyphenate(OUT_PARENT_ENV)
+        db_id = get_child_database_in_page_by_title(parent_id, TOTALS_DB_TITLE)
+        if db_id:
+            return db_id
+    return None
+
+def load_employee_totals_map():
+    """تحميل خريطة أسماء الموظفين من قاعدة التجميع"""
+    totals_db_id = get_totals_db_id()
+    if not totals_db_id:
+        print("⚠️ لم نجد قاعدة 'تجميع مبالغ الموظفين' للربط")
+        return {}
+    
+    print(f"🔗 تحميل أسماء الموظفين من قاعدة التجميع...")
+    name_to_id = {}
+    try:
+        pages = query_database_pages(totals_db_id, page_size=100)
+        for page in pages:
+            emp_name = title_from_page(page)
+            name_to_id[emp_name] = page["id"]
+        print(f"✅ تم تحميل {len(name_to_id)} موظف من قاعدة التجميع")
+    except Exception as e:
+        print(f"⚠️ خطأ في قراءة قاعدة التجميع: {e}")
+    
+    return name_to_id
     t = prop.get("type")
     if t == "people":
         ppl = prop.get("people", [])
@@ -246,7 +300,7 @@ def create_output_db_under_page(parent_page_id: str) -> str:
     print(f"🆕 أنشأنا قاعدة التقرير التفصيلي: {data.get('id')}")
     return data.get("id")
 
-def ensure_output_db() -> str:
+def ensure_output_db(totals_db_id: str = None) -> str:
     if OUT_DB_ID_ENV:
         print(f"🔗 استخدام قاعدة موجودة DETAILED_REPORT_DB_ID={OUT_DB_ID_ENV}")
         return hyphenate(OUT_DB_ID_ENV)
@@ -259,7 +313,7 @@ def ensure_output_db() -> str:
         return existing
     
     print("➕ إنشاء قاعدة التقرير التفصيلي…")
-    return create_output_db_under_page(parent_id)
+    return create_output_db_under_page(parent_id, totals_db_id)
 
 def ensure_output_columns(db_id: str):
     """التأكد من وجود الأعمدة المطلوبة (نادراً ما يُستخدم بعد الإنشاء الأول)"""
@@ -318,17 +372,20 @@ def generate_detailed_report():
     
     projects = query_database_pages(PROJECTS_DB_ID, page_size=100, limit=MAX_PROJECTS)
     print(f"📦 عدد المشاريع: {len(projects)}")
-
-    # جمع أسماء الموظفين
-    employee_db_ids = set()
-    name_map = {}
+    
+    # تحميل خريطة الموظفين من قاعدة التجميع
+    totals_map = load_employee_totals_map()
+    totals_db_id = get_totals_db_id()
     
     # إعداد قاعدة النتائج
-    out_db_id = ensure_output_db()
+    out_db_id = ensure_output_db(totals_db_id)
     clear_existing_rows(out_db_id)
     
     rows_created = 0
+    linked_count = 0
 
+    # إنشاء التقرير مباشرة
+    print("\n📝 إنشاء التقرير...")
     for idx, page in enumerate(projects, 1):
         pid = page["id"]
         ptitle = title_from_page(page)
@@ -344,9 +401,6 @@ def generate_detailed_report():
             print("  ⚠️ لم نحدد عمود الموظف")
             continue
         
-        if emp_rel_db:
-            employee_db_ids.add(hyphenate(emp_rel_db))
-        
         team_rows = query_database_pages(team_db_id, page_size=100)
         print(f"  👥 صفوف الفريق: {len(team_rows)}")
 
@@ -358,9 +412,18 @@ def generate_detailed_report():
             if not emp_cell:
                 continue
             
-            key = extract_employee_key(emp_cell)
-            if not key:
+            # استخراج ID الموظف
+            emp_id = extract_employee_name_from_relation(emp_cell) if emp_cell.get("type") == "relation" else extract_employee_key(emp_cell)
+            if not emp_id:
                 continue
+            
+            # جلب اسم الموظف مباشرة من صفحته
+            emp_name = emp_id
+            if looks_like_id(emp_id):
+                fetched_name = fetch_relation_page_title(emp_id)
+                if fetched_name:
+                    emp_name = fetched_name
+                    print(f"  ✓ {emp_name}")
             
             # استخراج المبلغ
             amount = 0.0
@@ -368,55 +431,26 @@ def generate_detailed_report():
                 amount = extract_amount(amt_cell)
             
             # تحديد حالة التحويل
-            status = "غير محول"  # القيمة الافتراضية
+            status = "غير محول"
             if status_key and status_key in props:
                 if is_transferred(extract_status_label(props[status_key])):
                     status = "محول"
             
-            # حفظ معلومات قاعدة الموظفين للاستخدام لاحقاً
-            if looks_like_id(key) and emp_rel_db:
-                if key not in name_map:
-                    name_map[key] = {"db": emp_rel_db}
-            
-            # استخدام الـ key مباشرة كاسم مؤقت
-            emp_name = key
+            # البحث عن الموظف في قاعدة التجميع للربط
+            totals_page_id = totals_map.get(emp_name)
+            if totals_page_id:
+                print(f"    🔗 ربط مع قاعدة التجميع")
+                linked_count += 1
             
             # إنشاء الصف
-            create_detail_row(out_db_id, emp_name, pid, amount, status)
+            create_detail_row(out_db_id, emp_name, pid, amount, status, totals_page_id)
             rows_created += 1
             time.sleep(SLEEP)
         
         time.sleep(SLEEP)
 
-    # الآن نحل أسماء الموظفين
-    if RESOLVE_NAMES and employee_db_ids:
-        print("\n🔎 تحميل أسماء الموظفين...")
-        for emp_db in list(employee_db_ids):
-            pages = query_database_pages(emp_db, page_size=100)
-            for pg in pages:
-                name_map[pg["id"]] = title_from_page(pg)
-            time.sleep(SLEEP)
-        
-        # تحديث أسماء الموظفين في التقرير
-        print("📝 تحديث أسماء الموظفين...")
-        report_pages = query_database_pages(out_db_id, page_size=100)
-        for rp in report_pages:
-            props = rp.get("properties", {})
-            emp_text = props.get(OUT_EMP_PROP, {})
-            if emp_text.get("title"):  # 👈 غيّرنا من rich_text إلى title
-                current_name = emp_text["title"][0].get("plain_text", "")
-                if looks_like_id(current_name) and current_name in name_map:
-                    new_name = name_map[current_name]
-                    try:
-                        http_patch(
-                            f"https://api.notion.com/v1/pages/{rp['id']}",
-                            {"properties": {OUT_EMP_PROP: {"title": [{"type":"text","text":{"content": new_name}}]}}}  # 👈 غيّرنا
-                        )
-                        time.sleep(SLEEP)
-                    except Exception as e:
-                        print(f"⚠️ تعذر تحديث اسم: {e}")
-
     print(f"\n✅ تم إنشاء {rows_created} صف في التقرير التفصيلي")
+    print(f"🔗 تم ربط {linked_count} صف مع قاعدة التجميع")
     
     try:
         db_info = retrieve_database(out_db_id)
