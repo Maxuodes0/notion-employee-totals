@@ -230,7 +230,7 @@ def create_output_db_under_page(parent_page_id: str) -> str:
         "parent": {"type": "page_id", "page_id": parent_page_id},
         "title": [{"type":"text","text":{"content": OUT_DB_TITLE}}],
         "properties": {
-            OUT_EMP_PROP: {"rich_text": {}},
+            OUT_EMP_PROP: {"title": {}},  # 👈 غيّرنا من rich_text إلى title
             OUT_PROJECT_PROP: {"relation": {
                 "database_id": PROJECTS_DB_ID,
                 "single_property": {}
@@ -271,7 +271,7 @@ def ensure_output_columns(db_id: str):
         # لا نحاول إضافة relation بعد الإنشاء لتجنب مشاكل الصلاحيات
         # فقط نتأكد من الأعمدة الأساسية الأخرى
         if OUT_EMP_PROP not in props:
-            patch["properties"][OUT_EMP_PROP] = {"rich_text": {}}
+            patch["properties"][OUT_EMP_PROP] = {"title": {}}  # 👈 غيّرنا
         if OUT_AMOUNT_PROP not in props:
             patch["properties"][OUT_AMOUNT_PROP] = {"number": {"format": "riyal"}}
         if OUT_STATUS_PROP not in props:
@@ -304,7 +304,7 @@ def create_detail_row(db_id: str, emp_name: str, project_id: str, amount: float,
     payload = {
         "parent": {"database_id": db_id},
         "properties": {
-            OUT_EMP_PROP: {"rich_text": [{"type":"text","text":{"content": emp_name}}]},
+            OUT_EMP_PROP: {"title": [{"type":"text","text":{"content": emp_name}}]},  # 👈 غيّرنا
             OUT_PROJECT_PROP: {"relation": [{"id": project_id}]},
             OUT_AMOUNT_PROP: {"number": amount},
             OUT_STATUS_PROP: {"select": {"name": status}}
@@ -403,14 +403,14 @@ def generate_detailed_report():
         for rp in report_pages:
             props = rp.get("properties", {})
             emp_text = props.get(OUT_EMP_PROP, {})
-            if emp_text.get("rich_text"):
-                current_name = emp_text["rich_text"][0].get("plain_text", "")
+            if emp_text.get("title"):  # 👈 غيّرنا من rich_text إلى title
+                current_name = emp_text["title"][0].get("plain_text", "")
                 if looks_like_id(current_name) and current_name in name_map:
                     new_name = name_map[current_name]
                     try:
                         http_patch(
                             f"https://api.notion.com/v1/pages/{rp['id']}",
-                            {"properties": {OUT_EMP_PROP: {"rich_text": [{"type":"text","text":{"content": new_name}}]}}}
+                            {"properties": {OUT_EMP_PROP: {"title": [{"type":"text","text":{"content": new_name}}]}}}  # 👈 غيّرنا
                         )
                         time.sleep(SLEEP)
                     except Exception as e:
