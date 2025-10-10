@@ -379,13 +379,16 @@ def generate_detailed_report():
     
     # إعداد قاعدة النتائج
     out_db_id = ensure_output_db(totals_db_id)
-    clear_existing_rows(out_db_id)
     
-    rows_created = 0
+    # جلب الصفوف الموجودة (بدل المسح)
+    existing_rows = get_existing_detail_rows_map(out_db_id)
+    
+    creates = 0
+    updates = 0
     linked_count = 0
 
     # إنشاء التقرير مباشرة
-    print("\n📝 إنشاء التقرير...")
+    print("\n📝 إنشاء/تحديث التقرير...")
     for idx, page in enumerate(projects, 1):
         pid = page["id"]
         ptitle = title_from_page(page)
@@ -442,14 +445,24 @@ def generate_detailed_report():
                 print(f"    🔗 ربط مع قاعدة التجميع")
                 linked_count += 1
             
-            # إنشاء الصف
-            create_detail_row(out_db_id, emp_name, pid, amount, status, totals_page_id)
-            rows_created += 1
+            # فحص: موجود أو جديد؟
+            row_key = f"{emp_name}|{pid}"
+            existing = existing_rows.get(row_key)
+            
+            if existing:
+                # تحديث صف موجود
+                update_detail_row(existing["id"], emp_name, pid, amount, status, totals_page_id)
+                updates += 1
+            else:
+                # إنشاء صف جديد
+                create_detail_row(out_db_id, emp_name, pid, amount, status, totals_page_id)
+                creates += 1
+            
             time.sleep(SLEEP)
         
         time.sleep(SLEEP)
 
-    print(f"\n✅ تم إنشاء {rows_created} صف في التقرير التفصيلي")
+    print(f"\n✅ النتائج: {creates} إنشاء | {updates} تحديث")
     print(f"🔗 تم ربط {linked_count} صف مع قاعدة التجميع")
     
     try:
