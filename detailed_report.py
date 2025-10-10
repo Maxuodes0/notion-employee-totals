@@ -1,4 +1,4 @@
-# detailed_report.py — تقرير تفصيلي: كل موظف + مشروعه + حالة التحويل
+# detailed_report.py — تقرير تفصيلي: كل موظف + مشروعه + حالة التحويل + ربط مع قاعدة التجميع
 import os, re, time, requests
 from collections import defaultdict
 
@@ -71,6 +71,9 @@ PROJECTS_DB_ID = hyphenate(RAW_PROJECTS_DB_ID)
 
 def retrieve_database(db_id):
     return http_get(f"https://api.notion.com/v1/databases/{db_id}").json()
+
+def retrieve_page(page_id):
+    return http_get(f"https://api.notion.com/v1/pages/{page_id}").json()
 
 def query_database_pages(db_id, page_size=100, limit=None, filter_payload=None):
     url = f"https://api.notion.com/v1/databases/{db_id}/query"
@@ -174,56 +177,7 @@ def extract_rollup_text(cell):
             return (rt[0].get("plain_text") or "").strip() if rt else ""
     return ""
 
-def extract_employee_name_from_relation(prop):
-    """استخراج اسم الموظف مباشرة من خلية Relation"""
-    if prop.get("type") == "relation":
-        rel = prop.get("relation", [])
-        if rel:
-            # نحاول نقرأ الاسم من الـ relation object نفسه
-            rel_id = rel[0].get("id")
-            # لو ما في اسم، نرجع الـ ID
-            return rel_id
-    return None
-
-def fetch_relation_page_title(page_id: str):
-    """جلب عنوان الصفحة المرتبطة"""
-    try:
-        page = retrieve_page(page_id)
-        return title_from_page(page)
-    except:
-        return None
-
-def get_totals_db_id():
-    """الحصول على معرّف قاعدة التجميع"""
-    if TOTALS_DB_ID_ENV:
-        return hyphenate(TOTALS_DB_ID_ENV)
-    # محاولة البحث عنها في نفس الصفحة
-    if OUT_PARENT_ENV:
-        parent_id = hyphenate(OUT_PARENT_ENV)
-        db_id = get_child_database_in_page_by_title(parent_id, TOTALS_DB_TITLE)
-        if db_id:
-            return db_id
-    return None
-
-def load_employee_totals_map():
-    """تحميل خريطة أسماء الموظفين من قاعدة التجميع"""
-    totals_db_id = get_totals_db_id()
-    if not totals_db_id:
-        print("⚠️ لم نجد قاعدة 'تجميع مبالغ الموظفين' للربط")
-        return {}
-    
-    print(f"🔗 تحميل أسماء الموظفين من قاعدة التجميع...")
-    name_to_id = {}
-    try:
-        pages = query_database_pages(totals_db_id, page_size=100)
-        for page in pages:
-            emp_name = title_from_page(page)
-            name_to_id[emp_name] = page["id"]
-        print(f"✅ تم تحميل {len(name_to_id)} موظف من قاعدة التجميع")
-    except Exception as e:
-        print(f"⚠️ خطأ في قراءة قاعدة التجميع: {e}")
-    
-    return name_to_id
+def extract_employee_key(prop):
     t = prop.get("type")
     if t == "people":
         ppl = prop.get("people", [])
@@ -279,12 +233,61 @@ def get_child_database_in_page_by_title(page_id: str, title: str):
                 return blk.get("id")
     return None
 
-def create_output_db_under_page(parent_page_id: str) -> str:
+def extract_employee_name_from_relation(prop):
+    """استخراج اسم الموظف مباشرة من خلية Relation"""
+    if prop.get("type") == "relation":
+        rel = prop.get("relation", [])
+        if rel:
+            rel_id = rel[0].get("id")
+            return rel_id
+    return None
+
+def fetch_relation_page_title(page_id: str):
+    """جلب عنوان الصفحة المرتبطة"""
+    try:
+        page = retrieve_page(page_id)
+        return title_from_page(page)
+    except:
+        return None
+
+def get_totals_db_id():
+    """الحصول على معرّف قاعدة التجميع"""
+    if TOTALS_DB_ID_ENV:
+        return hyphenate(TOTALS_DB_ID_ENV)
+    # محاولة البحث عنها في نفس الصفحة
+    if OUT_PARENT_ENV:
+        parent_id = hyphenate(OUT_PARENT_ENV)
+        db_id = get_child_database_in_page_by_title(parent_id, TOTALS_DB_TITLE)
+        if db_id:
+            return db_id
+    return None
+
+def load_employee_totals_map():
+    """تحميل خريطة أسماء الموظفين من قاعدة التجميع"""
+    totals_db_id = get_totals_db_id()
+    if not totals_db_id:
+        print("⚠️ لم نجد قاعدة 'تجميع مبالغ الموظفين' للربط")
+        return {}
+    
+    print(f"🔗 تحميل أسماء الموظفين من قاعدة التجميع...")
+    name_to_id = {}
+    try:
+        pages = query_database_pages(totals_db_id, page_size=100)
+        for page in pages:
+            emp_name = title_from_page(page)
+            name_to_id[emp_name] = page["id"]
+        print(f"✅ تم تحميل {len(name_to_id)} موظف من قاعدة التجميع")
+    except Exception as e:
+        print(f"⚠️ خطأ في قراءة قاعدة التجميع: {e}")
+    
+    return name_to_id
+
+def create_output_db_under_page(parent_page_id: str, totals_db_id: str = None) -> str:
     payload = {
         "parent": {"type": "page_id", "page_id": parent_page_id},
         "title": [{"type":"text","text":{"content": OUT_DB_TITLE}}],
         "properties": {
-            OUT_EMP_PROP: {"title": {}},  # 👈 غيّرنا من rich_text إلى title
+            OUT_EMP_PROP: {"title": {}},
             OUT_PROJECT_PROP: {"relation": {
                 "database_id": PROJECTS_DB_ID,
                 "single_property": {}
@@ -296,6 +299,16 @@ def create_output_db_under_page(parent_page_id: str) -> str:
             ]}}
         }
     }
+    
+    # إضافة عمود الربط مع قاعدة التجميع إذا وُجدت
+    if totals_db_id:
+        payload["properties"][OUT_TOTALS_REL_PROP] = {
+            "relation": {
+                "database_id": totals_db_id,
+                "single_property": {}
+            }
+        }
+    
     data = http_post("https://api.notion.com/v1/databases", payload).json()
     print(f"🆕 أنشأنا قاعدة التقرير التفصيلي: {data.get('id')}")
     return data.get("id")
@@ -314,44 +327,6 @@ def ensure_output_db(totals_db_id: str = None) -> str:
     
     print("➕ إنشاء قاعدة التقرير التفصيلي…")
     return create_output_db_under_page(parent_id, totals_db_id)
-
-def ensure_output_columns(db_id: str):
-    """التأكد من وجود الأعمدة المطلوبة (نادراً ما يُستخدم بعد الإنشاء الأول)"""
-    try:
-        db = retrieve_database(db_id)
-        props = db.get("properties", {}) or {}
-        patch = {"properties": {}}
-        
-        # لا نحاول إضافة relation بعد الإنشاء لتجنب مشاكل الصلاحيات
-        # فقط نتأكد من الأعمدة الأساسية الأخرى
-        if OUT_EMP_PROP not in props:
-            patch["properties"][OUT_EMP_PROP] = {"title": {}}  # 👈 غيّرنا
-        if OUT_AMOUNT_PROP not in props:
-            patch["properties"][OUT_AMOUNT_PROP] = {"number": {"format": "riyal"}}
-        if OUT_STATUS_PROP not in props:
-            patch["properties"][OUT_STATUS_PROP] = {"select": {"options": [
-                {"name": "محول", "color": "green"},
-                {"name": "غير محول", "color": "red"}
-            ]}}
-        
-        if patch["properties"]:
-            http_patch(f"https://api.notion.com/v1/databases/{db_id}", patch)
-            print("🔧 تأكدنا من الأعمدة الأساسية.")
-    except Exception as e:
-        print(f"⚠️ تحذير: تعذر التحقق من الأعمدة: {e}")
-
-def clear_existing_rows(db_id: str):
-    """مسح جميع الصفوف الموجودة لتجنب التكرار"""
-    print("🧹 مسح الصفوف القديمة...")
-    pages = query_database_pages(db_id, page_size=100)
-    for page in pages:
-        try:
-            # أرشفة الصفحة (مسحها)
-            http_patch(f"https://api.notion.com/v1/pages/{page['id']}", {"archived": True})
-            time.sleep(SLEEP)
-        except Exception as e:
-            print(f"⚠️ تعذر مسح صفحة: {e}")
-    print(f"✅ تم مسح {len(pages)} صف")
 
 def get_existing_detail_rows_map(db_id: str):
     """جلب الصفوف الموجودة وتنظيمها حسب (اسم الموظف + المشروع)"""
@@ -380,17 +355,38 @@ def get_existing_detail_rows_map(db_id: str):
     print(f"📋 وجدنا {len(m)} صف موجود")
     return m
 
-def create_detail_row(db_id: str, emp_name: str, project_id: str, amount: float, status: str):
-    """إنشاء صف جديد في التقرير التفصيلي"""
+def update_detail_row(page_id: str, emp_name: str, project_id: str, amount: float, status: str, totals_page_id: str = None):
+    """تحديث صف موجود"""
     payload = {
-        "parent": {"database_id": db_id},
         "properties": {
-            OUT_EMP_PROP: {"title": [{"type":"text","text":{"content": emp_name}}]},  # 👈 غيّرنا
+            OUT_EMP_PROP: {"title": [{"type":"text","text":{"content": emp_name}}]},
             OUT_PROJECT_PROP: {"relation": [{"id": project_id}]},
             OUT_AMOUNT_PROP: {"number": amount},
             OUT_STATUS_PROP: {"select": {"name": status}}
         }
     }
+    
+    if totals_page_id:
+        payload["properties"][OUT_TOTALS_REL_PROP] = {"relation": [{"id": totals_page_id}]}
+    
+    http_patch(f"https://api.notion.com/v1/pages/{page_id}", payload)
+
+def create_detail_row(db_id: str, emp_name: str, project_id: str, amount: float, status: str, totals_page_id: str = None):
+    """إنشاء صف جديد في التقرير التفصيلي"""
+    payload = {
+        "parent": {"database_id": db_id},
+        "properties": {
+            OUT_EMP_PROP: {"title": [{"type":"text","text":{"content": emp_name}}]},
+            OUT_PROJECT_PROP: {"relation": [{"id": project_id}]},
+            OUT_AMOUNT_PROP: {"number": amount},
+            OUT_STATUS_PROP: {"select": {"name": status}}
+        }
+    }
+    
+    # إضافة الربط مع قاعدة التجميع إذا وُجد
+    if totals_page_id:
+        payload["properties"][OUT_TOTALS_REL_PROP] = {"relation": [{"id": totals_page_id}]}
+    
     http_post("https://api.notion.com/v1/pages", payload)
 
 def generate_detailed_report():
