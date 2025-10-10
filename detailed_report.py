@@ -353,6 +353,33 @@ def clear_existing_rows(db_id: str):
             print(f"⚠️ تعذر مسح صفحة: {e}")
     print(f"✅ تم مسح {len(pages)} صف")
 
+def get_existing_detail_rows_map(db_id: str):
+    """جلب الصفوف الموجودة وتنظيمها حسب (اسم الموظف + المشروع)"""
+    pages = query_database_pages(db_id, page_size=100)
+    m = {}
+    for p in pages:
+        props = p.get("properties", {})
+        
+        # اسم الموظف
+        emp_name = ""
+        if OUT_EMP_PROP in props and props[OUT_EMP_PROP].get("title"):
+            emp_name = props[OUT_EMP_PROP]["title"][0].get("plain_text", "")
+        
+        # المشروع (ID)
+        project_id = ""
+        if OUT_PROJECT_PROP in props and props[OUT_PROJECT_PROP].get("relation"):
+            rel = props[OUT_PROJECT_PROP]["relation"]
+            if rel:
+                project_id = rel[0].get("id", "")
+        
+        # المفتاح = اسم الموظف + ID المشروع
+        if emp_name and project_id:
+            key = f"{emp_name}|{project_id}"
+            m[key] = {"id": p["id"]}
+    
+    print(f"📋 وجدنا {len(m)} صف موجود")
+    return m
+
 def create_detail_row(db_id: str, emp_name: str, project_id: str, amount: float, status: str):
     """إنشاء صف جديد في التقرير التفصيلي"""
     payload = {
