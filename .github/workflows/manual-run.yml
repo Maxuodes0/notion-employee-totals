@@ -1,7 +1,7 @@
 name: Manual Run - Detailed Report
 
 on:
-  workflow_dispatch:  # تشغيل يدوي فقط
+  workflow_dispatch:
 
 jobs:
   run-detailed-report:
@@ -22,5 +22,5 @@ jobs:
       - name: Run Detailed Report
         run: python detailed_report.py
         env:
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          DETAILED_REPORT_PARENT_PAGE_ID: ${{ secrets.DETAILED_REPORT_PARENT_PAGE_ID }}
+          NOTION_API_KEY: ${{ secrets.NOTION_TOKEN }}
+          DETAILED_REPORT_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
