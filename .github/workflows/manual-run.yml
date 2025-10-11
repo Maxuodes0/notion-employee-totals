@@ -1,26 +1,59 @@
-name: Manual Run - Detailed Report
-
+name: Notion قواعد البيانات (every 3 Hours)
 on:
-  workflow_dispatch:
-
+  schedule:
+   - cron: "0 22,1,4,7,10,13,16,19 * * *"
+  workflow_dispatch:          # تشغيل يدوي
 jobs:
-  run-detailed-report:
+  run:
     runs-on: ubuntu-latest
-    
+    concurrency:
+      group: notion-employee-totals
+      cancel-in-progress: true
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-      
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      
-      - name: Run Detailed Report
-        run: python detailed_report.py
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests
+          fi
+      # 1) تجميع مبالغ الموظفين
+      - name: Run main.py
         env:
-          NOTION_API_KEY: ${{ secrets.NOTION_TOKEN }}
-          DETAILED_REPORT_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          EMP_TOTALS_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+          PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
+          NOTION_VERSION: "2025-09-03"
+          # لو تبي يمنع الإنشاء ويكتب على DB معيّنة:
+          # EMP_TOTALS_DB_ID: ${{ vars.EMP_TOTALS_DB_ID }}
+        run: |
+          python main.py | tee run_main.log
+      # 2) ربحية المشاريع = (قيمة بدون ضريبة) - (مجموع التكاليف)
+      - name: Run project_profit.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
+          # خلّينا قاعدة الربحية تُنشأ تحت نفس صفحة الأم:
+          PROFIT_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+          NOTION_VERSION: "2025-09-03"
+          VAT_RATE: "0.15"   # غيّرها لو نسبة الضريبة عندك غير 15%
+          # أو لو عندك قاعدة ربحية جاهزة وتبغى الكتابة عليها مباشرة:
+          # PROFIT_DB_ID: ${{ vars.PROFIT_DB_ID }}
+        run: |
+          python project_profit.py | tee run_profit.log
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notion-employee-totals-logs
+          path: |
+            run_main.log
+            run_profit.log
+          retention-days: 7
