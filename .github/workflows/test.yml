@@ -1,8 +1,52 @@
-name: Test Workflow
+name: Notion قواعد البيانات (every 3 Hours)
 on:
+  schedule:
+    - cron: "0 22,1,4,7,10,13,16,19 * * *"
   workflow_dispatch:
 jobs:
-  test:
+  run:
     runs-on: ubuntu-latest
+    concurrency:
+      group: notion-employee-totals
+      cancel-in-progress: true
     steps:
-      - run: echo "Hello World"
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests
+          fi
+      - name: Run main.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          EMP_TOTALS_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+          PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
+          NOTION_VERSION: "2025-09-03"
+        run: |
+          python main.py | tee run_main.log
+      - name: Run project_profit.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
+          PROFIT_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+          NOTION_VERSION: "2025-09-03"
+          VAT_RATE: "0.15"
+        run: |
+          python project_profit.py | tee run_profit.log
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notion-employee-totals-logs
+          path: |
+            run_main.log
+            run_profit.log
+          retention-days: 7
