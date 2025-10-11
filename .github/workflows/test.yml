@@ -41,6 +41,13 @@ jobs:
           VAT_RATE: "0.15"
         run: |
           python project_profit.py | tee run_profit.log
+      - name: Run detailed_report.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
+          NOTION_VERSION: "2025-09-03"
+        run: |
+          python detailed_report.py | tee run_detailed.log
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -49,4 +56,5 @@ jobs:
           path: |
             run_main.log
             run_profit.log
+            run_detailed.log
           retention-days: 7
