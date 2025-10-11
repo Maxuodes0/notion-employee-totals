@@ -1,1 +1,40 @@
 
+name: Notion DB Update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */3 * * *"
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Install dependencies
+        run: pip install requests
+      
+      - name: Run main script
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          EMP_TOTALS_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+          PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
+          NOTION_VERSION: "2025-09-03"
+        run: python main.py
+      
+      - name: Run profit script
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
+          PROFIT_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+          NOTION_VERSION: "2025-09-03"
+          VAT_RATE: "0.15"
+        run: python project_profit.py
