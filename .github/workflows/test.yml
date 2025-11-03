@@ -29,7 +29,7 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           EMP_TOTALS_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
           PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
-          NOTION_VERSION: "2025-09-03"
+          NOTION_VERSION: "2022-06-28"
         run: |
           python main.py | tee run_main.log
       - name: Run project_profit.py
@@ -37,7 +37,7 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
           PROFIT_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
-          NOTION_VERSION: "2025-09-03"
+          NOTION_VERSION: "2022-06-28"
           VAT_RATE: "0.15"
         run: |
           python project_profit.py | tee run_profit.log
@@ -45,7 +45,9 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
-          NOTION_VERSION: "2025-09-03"
+          DETAILED_REPORT_DB_ID: ${{ secrets.DETAILED_REPORT_DB_ID }}
+          EMP_TOTALS_DB_ID: ${{ secrets.EMP_TOTALS_DB_ID }} # اختياري، إذا عندك قاعدة "تجميع مبالغ الموظفين"
+          NOTION_VERSION: "2022-06-28"
         run: |
           python detailed_report.py | tee run_detailed.log
       - name: Upload logs
