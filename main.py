@@ -47,12 +47,43 @@ HDRS = {
     "Content-Type": "application/json",
 }
 
+# ============ تحسينات تشغيلية (لا تغيّر النتيجة) ============
+SESSION = requests.Session()
+SESSION.headers.update(HDRS)
+
+def _sleep_backoff(attempt: int):
+    # Backoff بسيط جداً لتخفيف 429/5xx
+    time.sleep(min(2.0, 0.25 * (2 ** attempt)))
+
+def _request(method: str, url: str, *, params=None, json=None, timeout=DEFAULT_TIMEOUT):
+    # Retry خفيف على 429/5xx فقط (ما يغيّر المنطق/النتائج)
+    last_exc = None
+    for attempt in range(4):  # 0..3
+        try:
+            r = SESSION.request(method, url, params=params, json=json, timeout=timeout)
+            if r.status_code in (429, 500, 502, 503, 504):
+                _sleep_backoff(attempt)
+                continue
+            r.raise_for_status()
+            return r
+        except requests.RequestException as e:
+            last_exc = e
+            _sleep_backoff(attempt)
+            continue
+    # آخر محاولة: ارفع الخطأ
+    if isinstance(last_exc, requests.HTTPError):
+        raise last_exc
+    raise last_exc
+
 def http_get(url, params=None):
-    r = requests.get(url, headers=HDRS, params=params, timeout=DEFAULT_TIMEOUT); r.raise_for_status(); return r
+    return _request("GET", url, params=params)
+
 def http_post(url, json=None):
-    r = requests.post(url, headers=HDRS, json=json or {}, timeout=DEFAULT_TIMEOUT); r.raise_for_status(); return r
+    return _request("POST", url, json=json or {})
+
 def http_patch(url, json=None):
-    r = requests.patch(url, headers=HDRS, json=json or {}, timeout=DEFAULT_TIMEOUT); r.raise_for_status(); return r
+    return _request("PATCH", url, json=json or {})
+# ============================================================
 
 def hyphenate(nid: str) -> str:
     nid = nid.strip()
@@ -70,7 +101,8 @@ def query_database_pages(db_id, page_size=100, limit=None, filter_payload=None):
     url = f"https://api.notion.com/v1/databases/{db_id}/query"
     res, cursor = [], None
     while True:
-        body = {"page_size": page_size}
+        # Notion max page_size = 100
+        body = {"page_size": min(int(page_size or 100), 100)}
         if cursor: body["start_cursor"] = cursor
         if filter_payload: body.update(filter_payload)
         data = http_post(url, body).json()
@@ -366,7 +398,8 @@ def aggregate_and_write():
     out_db_id = ensure_output_db(); ensure_output_columns(out_db_id); upsert_bulk(out_db_id, records)
     try:
         db_info = retrieve_database(out_db_id); print(f"📄 افتح القاعدة مباشرة: {db_info.get('url')}")
-    except: pass
+    except:
+        pass
     print("🎯 اكتمل التحديث.")
 
 if __name__ == "__main__":
@@ -376,9 +409,12 @@ if __name__ == "__main__":
     except requests.exceptions.Timeout:
         print("⏰ Timeout — الشبكة بطيئة/رد Notion تأخر.")
     except requests.HTTPError as e:
-        print("❌ HTTPError:", e); 
-        try: print("↪️ Response:", e.response.status_code, e.response.text)
-        except: pass
+        print("❌ HTTPError:", e)
+        try:
+            # طباعة أوضح وقت الخطأ (ما تظهر إلا إذا صار خطأ)
+            print("↪️ Response:", e.response.status_code, e.response.text)
+        except:
+            pass
     except AssertionError as e:
         print("❗", e)
     except Exception as e:
