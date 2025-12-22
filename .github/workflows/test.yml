@@ -30,6 +30,7 @@ jobs:
             pip install requests
           fi
 
+      # ===== تشغيل تجميع مبالغ الموظفين =====
       - name: Run main.py
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -39,10 +40,24 @@ jobs:
         run: |
           python main.py | tee run_main.log
 
+      # ===== تشغيل ربحية المشاريع =====
+      - name: Run project_profit.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          PROFIT_PARENT_PAGE_ID: ${{ secrets.EMP_TOTALS_PARENT_PAGE_ID }}
+          PROJECTS_DB_ID: ${{ vars.PROJECTS_DB_ID }}
+          VAT_RATE: "0.15"
+          NOTION_VERSION: "2022-06-28"
+        run: |
+          python project_profit.py | tee run_profit.log
+
+      # ===== رفع اللوقات =====
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: notion-main-only-logs
-          path: run_main.log
+          name: notion-main-and-profit-logs
+          path: |
+            run_main.log
+            run_profit.log
           retention-days: 7
