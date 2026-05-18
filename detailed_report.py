@@ -1,4 +1,5 @@
-# employee_totals_update.py
+# detailed_report.py
+# يقرأ المشاريع + فريق المشروع، يجمع مبالغ كل موظف، ثم يحدث جدول "تجميع مبالغ الموظفين"
 
 import os
 import re
@@ -9,7 +10,8 @@ from collections import defaultdict
 RAW_PROJECTS_DB_ID = "23e6fe2a5e8e8003a6bfcf99ae01ba0c"
 TEAM_DB_NAME = "فريق المشروع"
 
-TOTALS_DB_ID = os.getenv("EMP_TOTALS_DB_ID")
+TOTALS_DB_ID_ENV = os.getenv("EMP_TOTALS_DB_ID")
+TOTALS_DB_TITLE = "تجميع مبالغ الموظفين"
 
 EMP_NAME_PROP = "اسم الموظف"
 TRANSFERRED_AMOUNT_PROP = "المبلغ المحول"
@@ -33,12 +35,12 @@ TRANSFER_TRUE_VALUES = {
     "done",
     "تم",
     "محول",
-    "محولة"
+    "محولة",
 }
 
 API_KEY = os.getenv("NOTION_API_KEY") or os.getenv("NOTION_TOKEN")
 assert API_KEY, "🚫 أضف NOTION_API_KEY أو NOTION_TOKEN في Secrets."
-assert TOTALS_DB_ID, "🚫 أضف EMP_TOTALS_DB_ID في Secrets."
+assert TOTALS_DB_ID_ENV, "🚫 أضف EMP_TOTALS_DB_ID في Secrets."
 
 HDRS = {
     "Authorization": f"Bearer {API_KEY}",
@@ -68,7 +70,7 @@ def hyphenate(nid: str) -> str:
 
 
 PROJECTS_DB_ID = hyphenate(RAW_PROJECTS_DB_ID)
-TOTALS_DB_ID = hyphenate(TOTALS_DB_ID)
+TOTALS_DB_ID = hyphenate(TOTALS_DB_ID_ENV)
 
 
 def _backoff(attempt):
@@ -80,18 +82,18 @@ def _request(method, url, **kwargs):
 
     for attempt in range(4):
         try:
-            r = SESSION.request(method, url, timeout=DEFAULT_TIMEOUT, **kwargs)
+            response = SESSION.request(method, url, timeout=DEFAULT_TIMEOUT, **kwargs)
 
-            if r.status_code in (429, 500, 502, 503, 504):
+            if response.status_code in (429, 500, 502, 503, 504):
                 _backoff(attempt)
                 continue
 
-            if not r.ok:
-                print("❌ Notion Error Response:")
-                print(r.text)
+            if not response.ok:
+                print("❌ Notion API Error:")
+                print(response.text)
 
-            r.raise_for_status()
-            return r
+            response.raise_for_status()
+            return response
 
         except requests.RequestException as e:
             last = e
@@ -116,7 +118,7 @@ def retrieve_database(db_id):
     return http_get(f"https://api.notion.com/v1/databases/{hyphenate(db_id)}").json()
 
 
-def retrieve_page(page_id):
+def retrieve_page_title(page_id):
     page_id = hyphenate(page_id)
 
     if page_id in PAGE_TITLE_CACHE:
@@ -131,7 +133,7 @@ def retrieve_page(page_id):
 
 def query_database_pages(db_id, page_size=100, limit=None, filter_body=None):
     url = f"https://api.notion.com/v1/databases/{hyphenate(db_id)}/query"
-    res = []
+    results = []
     cursor = None
 
     while True:
@@ -146,10 +148,10 @@ def query_database_pages(db_id, page_size=100, limit=None, filter_body=None):
             body["filter"] = filter_body
 
         data = http_post(url, body).json()
-        res.extend(data.get("results", []))
+        results.extend(data.get("results", []))
 
-        if limit and len(res) >= limit:
-            return res[:limit]
+        if limit and len(results) >= limit:
+            return results[:limit]
 
         if not data.get("has_more"):
             break
@@ -157,12 +159,12 @@ def query_database_pages(db_id, page_size=100, limit=None, filter_body=None):
         cursor = data.get("next_cursor")
         time.sleep(SLEEP)
 
-    return res
+    return results
 
 
 def list_block_children_all(block_id):
     url = f"https://api.notion.com/v1/blocks/{hyphenate(block_id)}/children"
-    res = []
+    results = []
     cursor = None
 
     while True:
@@ -172,7 +174,7 @@ def list_block_children_all(block_id):
             params["start_cursor"] = cursor
 
         data = http_get(url, params=params).json()
-        res.extend(data.get("results", []))
+        results.extend(data.get("results", []))
 
         if not data.get("has_more"):
             break
@@ -180,13 +182,13 @@ def list_block_children_all(block_id):
         cursor = data.get("next_cursor")
         time.sleep(SLEEP)
 
-    return res
+    return results
 
 
 def title_from_page(page):
-    for value in (page.get("properties") or {}).values():
-        if value.get("type") == "title":
-            arr = value.get("title", [])
+    for prop in (page.get("properties") or {}).values():
+        if prop.get("type") == "title":
+            arr = prop.get("title", [])
             if arr:
                 return arr[0].get("plain_text", "").strip()
 
@@ -206,7 +208,7 @@ def find_team_db_id_in_project_page(page_id):
 
 def score_name(name, keywords):
     name = (name or "").lower()
-    return sum(1 for k in keywords if k in name)
+    return sum(1 for keyword in keywords if keyword in name)
 
 
 def detect_team_schema(team_db_id):
@@ -228,7 +230,7 @@ def detect_team_schema(team_db_id):
         None
     )
 
-    amt_key = (
+    amount_key = (
         max(numbery, key=lambda n: (score_name(n, AMOUNT_KEYWORDS), len(n)))
         if numbery else None
     )
@@ -238,18 +240,18 @@ def detect_team_schema(team_db_id):
         if statusy else None
     )
 
-    return emp_key, amt_key, status_key
+    return emp_key, amount_key, status_key
 
 
 def extract_textlike(prop):
     if not prop:
         return ""
 
-    t = prop.get("type")
+    prop_type = prop.get("type")
 
-    if t == "title":
+    if prop_type == "title":
         arr = prop.get("title", [])
-    elif t == "rich_text":
+    elif prop_type == "rich_text":
         arr = prop.get("rich_text", [])
     else:
         return ""
@@ -261,18 +263,20 @@ def extract_amount(prop):
     if not prop:
         return 0.0
 
-    t = prop.get("type")
+    prop_type = prop.get("type")
 
-    if t == "number":
+    if prop_type == "number":
         return float(prop.get("number") or 0)
 
-    if t == "formula":
+    if prop_type == "formula":
         formula = prop.get("formula") or {}
+
         if formula.get("type") == "number":
             return float(formula.get("number") or 0)
+
         return 0.0
 
-    if t == "rollup":
+    if prop_type == "rollup":
         rollup = prop.get("rollup") or {}
 
         if rollup.get("type") == "number":
@@ -280,8 +284,10 @@ def extract_amount(prop):
 
         if rollup.get("type") == "array":
             total = 0.0
+
             for item in rollup.get("array", []):
                 total += extract_amount(item)
+
             return total
 
     return 0.0
@@ -291,32 +297,34 @@ def extract_employee_name(prop):
     if not prop:
         return ""
 
-    t = prop.get("type")
+    prop_type = prop.get("type")
 
-    if t == "people":
+    if prop_type == "people":
         people = prop.get("people", [])
         return people[0].get("name", "").strip() if people else ""
 
-    if t == "relation":
-        rel = prop.get("relation", [])
-        if not rel:
+    if prop_type == "relation":
+        relation = prop.get("relation", [])
+
+        if not relation:
             return ""
 
-        page_id = rel[0].get("id")
-        return retrieve_page(page_id)
+        related_page_id = relation[0].get("id")
+        return retrieve_page_title(related_page_id)
 
-    if t == "rollup":
+    if prop_type == "rollup":
         rollup = prop.get("rollup") or {}
 
         if rollup.get("type") == "array":
             for item in rollup.get("array", []):
                 name = extract_employee_name(item)
+
                 if name:
                     return name
 
         return ""
 
-    if t in ("title", "rich_text"):
+    if prop_type in ("title", "rich_text"):
         return extract_textlike(prop)
 
     return ""
@@ -326,12 +334,12 @@ def extract_status_label(prop):
     if not prop:
         return ""
 
-    t = prop.get("type")
+    prop_type = prop.get("type")
 
-    if t in ("select", "status"):
-        return (prop.get(t) or {}).get("name", "").strip()
+    if prop_type in ("select", "status"):
+        return (prop.get(prop_type) or {}).get("name", "").strip()
 
-    if t in ("title", "rich_text"):
+    if prop_type in ("title", "rich_text"):
         return extract_textlike(prop)
 
     return ""
@@ -350,7 +358,7 @@ def validate_totals_database():
     db = retrieve_database(TOTALS_DB_ID)
     props = db.get("properties", {}) or {}
 
-    required = [
+    required_props = [
         EMP_NAME_PROP,
         TRANSFERRED_AMOUNT_PROP,
         NOT_TRANSFERRED_AMOUNT_PROP,
@@ -360,12 +368,12 @@ def validate_totals_database():
         NOT_TRANSFERRED_PROJECTS_PROP,
     ]
 
-    missing = [p for p in required if p not in props]
+    missing = [prop for prop in required_props if prop not in props]
 
     if missing:
         raise ValueError(f"🚫 الأعمدة التالية غير موجودة في جدول التجميع: {missing}")
 
-    print("✅ تم التحقق من أعمدة جدول التجميع")
+    print("✅ تم التحقق من جدول التجميع")
 
 
 def find_employee_row(employee_name):
@@ -390,11 +398,10 @@ def build_totals_properties(employee_name, data):
     transferred_amount = float(data["transferred_amount"])
     not_transferred_amount = float(data["not_transferred_amount"])
     total_amount = transferred_amount + not_transferred_amount
+    project_count = len(data["all_projects"])
 
     transferred_projects = "، ".join(sorted(data["transferred_projects"]))
     not_transferred_projects = "، ".join(sorted(data["not_transferred_projects"]))
-
-    project_count = len(data["all_projects"])
 
     return {
         EMP_NAME_PROP: {
@@ -438,7 +445,7 @@ def build_totals_properties(employee_name, data):
                     }
                 }
             ]
-        }
+        },
     }
 
 
@@ -488,11 +495,11 @@ def collect_employee_totals():
 
     print(f"📦 عدد المشاريع: {len(projects)}")
 
-    for idx, project_page in enumerate(projects, 1):
+    for index, project_page in enumerate(projects, 1):
         project_id = project_page["id"]
         project_name = title_from_page(project_page)
 
-        print(f"\n[{idx}] {project_name}")
+        print(f"\n[{index}] {project_name}")
 
         team_db_id = find_team_db_id_in_project_page(project_id)
 
@@ -500,13 +507,13 @@ def collect_employee_totals():
             print("  ⚠️ لا يوجد جدول فريق المشروع")
             continue
 
-        emp_key, amt_key, status_key = detect_team_schema(team_db_id)
+        emp_key, amount_key, status_key = detect_team_schema(team_db_id)
 
         if not emp_key:
             print("  ⚠️ لم يتم العثور على عمود الموظف")
             continue
 
-        if not amt_key:
+        if not amount_key:
             print("  ⚠️ لم يتم العثور على عمود المبلغ")
             continue
 
@@ -514,14 +521,14 @@ def collect_employee_totals():
 
         print(f"  👥 صفوف الفريق: {len(rows)}")
         print(f"  🧩 عمود الموظف: {emp_key}")
-        print(f"  🧩 عمود المبلغ: {amt_key}")
+        print(f"  🧩 عمود المبلغ: {amount_key}")
         print(f"  🧩 عمود حالة التحويل: {status_key or 'غير موجود'}")
 
         for row in rows:
             props = row.get("properties", {}) or {}
 
             employee_name = extract_employee_name(props.get(emp_key))
-            amount = extract_amount(props.get(amt_key))
+            amount = extract_amount(props.get(amount_key))
 
             if not employee_name:
                 continue
