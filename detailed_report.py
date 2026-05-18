@@ -1,5 +1,6 @@
 # detailed_report.py
 # يقرأ المشاريع + فريق المشروع، يجمع مبالغ كل موظف، ثم يحدث جدول تجميع الموظفين في Notion
+# ملاحظة: أعمدة "مشاريع محوّلة" و "مشاريع غير محوّلة" نوعها Relation
 
 import os
 import re
@@ -50,6 +51,8 @@ HDRS = {
 
 SESSION = requests.Session()
 SESSION.headers.update(HDRS)
+
+PAGE_TITLE_CACHE = {}
 
 
 def hyphenate(nid: str) -> str:
@@ -116,6 +119,19 @@ def retrieve_page(page_id):
     return http_get(f"https://api.notion.com/v1/pages/{hyphenate(page_id)}").json()
 
 
+def retrieve_page_title(page_id):
+    page_id = hyphenate(page_id)
+
+    if page_id in PAGE_TITLE_CACHE:
+        return PAGE_TITLE_CACHE[page_id]
+
+    page = retrieve_page(page_id)
+    title = title_from_page(page)
+
+    PAGE_TITLE_CACHE[page_id] = title
+    return title
+
+
 def query_database_pages(db_id, page_size=100, filter_body=None):
     url = f"https://api.notion.com/v1/databases/{hyphenate(db_id)}/query"
 
@@ -123,7 +139,9 @@ def query_database_pages(db_id, page_size=100, filter_body=None):
     cursor = None
 
     while True:
-        body = {"page_size": min(page_size, 100)}
+        body = {
+            "page_size": min(page_size, 100)
+        }
 
         if cursor:
             body["start_cursor"] = cursor
@@ -252,8 +270,10 @@ def extract_amount(prop):
 
     if prop_type == "formula":
         formula = prop.get("formula") or {}
+
         if formula.get("type") == "number":
             return float(formula.get("number") or 0)
+
         return 0.0
 
     if prop_type == "rollup":
@@ -264,8 +284,10 @@ def extract_amount(prop):
 
         if rollup.get("type") == "array":
             total = 0.0
+
             for item in rollup.get("array", []):
                 total += extract_amount(item)
+
             return total
 
     return 0.0
@@ -283,12 +305,12 @@ def extract_employee_name(prop):
 
     if prop_type == "relation":
         relation = prop.get("relation", [])
+
         if not relation:
             return ""
 
         related_page_id = relation[0].get("id")
-        related_page = retrieve_page(related_page_id)
-        return title_from_page(related_page)
+        return retrieve_page_title(related_page_id)
 
     if prop_type == "rollup":
         rollup = prop.get("rollup") or {}
@@ -296,6 +318,7 @@ def extract_employee_name(prop):
         if rollup.get("type") == "array":
             for item in rollup.get("array", []):
                 name = extract_employee_name(item)
+
                 if name:
                     return name
 
@@ -351,6 +374,17 @@ def validate_totals_database():
         print(list(props.keys()))
         raise ValueError(f"🚫 الأعمدة غير موجودة: {missing}")
 
+    relation_errors = []
+
+    if props[TRANSFERRED_PROJECTS_PROP].get("type") != "relation":
+        relation_errors.append(TRANSFERRED_PROJECTS_PROP)
+
+    if props[NOT_TRANSFERRED_PROJECTS_PROP].get("type") != "relation":
+        relation_errors.append(NOT_TRANSFERRED_PROJECTS_PROP)
+
+    if relation_errors:
+        raise ValueError(f"🚫 الأعمدة التالية لازم تكون Relation في Notion: {relation_errors}")
+
     print("✅ تم التحقق من أعمدة جدول التجميع")
 
 
@@ -371,21 +405,27 @@ def find_employee_row(employee_name):
     return rows[0]["id"] if rows else None
 
 
+def relation_items(project_ids):
+    return [
+        {"id": hyphenate(project_id)}
+        for project_id in sorted(project_ids)
+    ]
+
+
 def build_properties(employee_name, data):
     transferred_amount = float(data["transferred_amount"])
     not_transferred_amount = float(data["not_transferred_amount"])
     total_amount = transferred_amount + not_transferred_amount
     project_count = len(data["all_projects"])
 
-    transferred_projects = "، ".join(sorted(data["transferred_projects"]))[:1900]
-    not_transferred_projects = "، ".join(sorted(data["not_transferred_projects"]))[:1900]
-
     return {
         EMP_NAME_PROP: {
             "title": [
                 {
                     "type": "text",
-                    "text": {"content": employee_name}
+                    "text": {
+                        "content": employee_name
+                    }
                 }
             ]
         },
@@ -402,27 +442,19 @@ def build_properties(employee_name, data):
             "number": project_count
         },
         TRANSFERRED_PROJECTS_PROP: {
-            "rich_text": [
-                {
-                    "type": "text",
-                    "text": {"content": transferred_projects}
-                }
-            ]
+            "relation": relation_items(data["transferred_projects"])
         },
         NOT_TRANSFERRED_PROJECTS_PROP: {
-            "rich_text": [
-                {
-                    "type": "text",
-                    "text": {"content": not_transferred_projects}
-                }
-            ]
+            "relation": relation_items(data["not_transferred_projects"])
         },
     }
 
 
 def create_employee_row(employee_name, data):
     body = {
-        "parent": {"database_id": TOTALS_DB_ID},
+        "parent": {
+            "database_id": TOTALS_DB_ID
+        },
         "properties": build_properties(employee_name, data)
     }
 
@@ -505,15 +537,15 @@ def collect_totals():
             raw_status = extract_status_label(props.get(status_key)) if status_key else ""
             transferred = is_transferred(raw_status)
 
-            totals[employee_name]["all_projects"].add(project_name)
+            totals[employee_name]["all_projects"].add(project_id)
 
             if transferred:
                 totals[employee_name]["transferred_amount"] += amount
-                totals[employee_name]["transferred_projects"].add(project_name)
+                totals[employee_name]["transferred_projects"].add(project_id)
                 status_text = "محول"
             else:
                 totals[employee_name]["not_transferred_amount"] += amount
-                totals[employee_name]["not_transferred_projects"].add(project_name)
+                totals[employee_name]["not_transferred_projects"].add(project_id)
                 status_text = "غير محول"
 
             print(f"    ✓ {employee_name} | {amount} | {status_text}")
