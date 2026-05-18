@@ -1,6 +1,10 @@
-# detailed_report.py — تقرير تفصيلي: كل موظف + مشروعه + حالة التحويل + ربط مع قاعدة التجميع
-import os, re, time, requests
-from collections import defaultdict
+# detailed_report.py
+# تقرير تفصيلي: كل موظف + مشروعه + حالة التحويل + تحديث Database في Notion
+
+import os
+import re
+import time
+import requests
 
 RAW_PROJECTS_DB_ID = "23e6fe2a5e8e8003a6bfcf99ae01ba0c"
 TEAM_DB_NAME = "فريق المشروع"
@@ -8,26 +12,22 @@ TEAM_DB_NAME = "فريق المشروع"
 OUT_DB_ID_ENV = os.getenv("DETAILED_REPORT_DB_ID")
 OUT_PARENT_ENV = os.getenv("DETAILED_REPORT_PARENT_PAGE_ID")
 
-TOTALS_DB_ID_ENV = os.getenv("EMP_TOTALS_DB_ID")
-TOTALS_DB_TITLE = "تجميع مبالغ الموظفين"
-
 OUT_DB_TITLE = "تقرير تفصيلي - الموظفين والمشاريع"
 OUT_EMP_PROP = "اسم الموظف"
 OUT_PROJECT_PROP = "المشروع"
 OUT_AMOUNT_PROP = "المبلغ"
 OUT_STATUS_PROP = "حالة التحويل"
-OUT_TOTALS_REL_PROP = "تجميع مبالغ الموظفين"
 
 DEFAULT_TIMEOUT = 30
 SLEEP = 0.15
 MAX_PROJECTS = None
 
-EMP_KEYWORDS = ["employee","موظف","member","عضو","team","hr","database","اسم"]
-AMOUNT_KEYWORDS = ["total","amount","إجمالي","المجموع","قيمة","مبلغ","sum"]
-STATUS_KEYWORDS = ["status","transfer","تحويل","حالة","الحوالة","محول","محولة"]
+EMP_KEYWORDS = ["employee", "موظف", "member", "عضو", "team", "hr", "database", "اسم"]
+AMOUNT_KEYWORDS = ["total", "amount", "إجمالي", "المجموع", "قيمة", "مبلغ", "sum"]
+STATUS_KEYWORDS = ["status", "transfer", "تحويل", "حالة", "الحوالة", "محول", "محولة"]
 
-TRANSFER_TRUE_VALUES = {"transferred","paid","done","تم","محول","محولة"}
-TRANSFER_FALSE_VALUES = {"not yet","pending","unpaid","لم","غير","لم تُحوّل","لم تحول"}
+TRANSFER_TRUE_VALUES = {"transferred", "paid", "done", "تم", "محول", "محولة"}
+TRANSFER_FALSE_VALUES = {"not yet", "pending", "unpaid", "لم", "غير", "لم تُحوّل", "لم تحول"}
 
 API_KEY = os.getenv("NOTION_API_KEY") or os.getenv("NOTION_TOKEN")
 assert API_KEY, "🚫 أضف NOTION_API_KEY أو NOTION_TOKEN في Secrets."
@@ -38,192 +38,582 @@ HDRS = {
     "Content-Type": "application/json",
 }
 
-# ===== تحسينات تشغيلية فقط =====
 SESSION = requests.Session()
 SESSION.headers.update(HDRS)
+
 
 def _backoff(attempt):
     time.sleep(min(2.0, 0.25 * (2 ** attempt)))
 
+
 def _request(method, url, **kwargs):
     last = None
+
     for attempt in range(4):
         try:
             r = SESSION.request(method, url, timeout=DEFAULT_TIMEOUT, **kwargs)
+
             if r.status_code in (429, 500, 502, 503, 504):
                 _backoff(attempt)
                 continue
+
             r.raise_for_status()
             return r
+
         except requests.RequestException as e:
             last = e
             _backoff(attempt)
+
     raise last
+
 
 def http_get(url, params=None):
     return _request("GET", url, params=params)
 
+
 def http_post(url, json=None):
     return _request("POST", url, json=json or {})
+
 
 def http_patch(url, json=None):
     return _request("PATCH", url, json=json or {})
 
-# =================================
 
 def hyphenate(nid: str) -> str:
-    if "-" in nid: return nid
+    if not nid:
+        return nid
+
+    nid = nid.strip()
+
+    if "-" in nid:
+        return nid
+
     if re.fullmatch(r"[0-9a-fA-F]{32}", nid):
         return f"{nid[:8]}-{nid[8:12]}-{nid[12:16]}-{nid[16:20]}-{nid[20:]}"
+
     return nid
 
+
 PROJECTS_DB_ID = hyphenate(RAW_PROJECTS_DB_ID)
+
 
 def retrieve_database(db_id):
     return http_get(f"https://api.notion.com/v1/databases/{db_id}").json()
 
+
 def retrieve_page(page_id):
     return http_get(f"https://api.notion.com/v1/pages/{page_id}").json()
 
-def query_database_pages(db_id, page_size=100, limit=None):
-    url = f"https://api.notion.com/v1/databases/{db_id}/query"
-    res, cursor = [], None
+
+def query_database_pages(db_id, page_size=100, limit=None, filter_body=None):
+    url = f"https://api.notion.com/v1/databases/{hyphenate(db_id)}/query"
+    res = []
+    cursor = None
+
     while True:
         body = {"page_size": min(int(page_size), 100)}
+
         if cursor:
             body["start_cursor"] = cursor
+
+        if filter_body:
+            body["filter"] = filter_body
+
         data = http_post(url, body).json()
         res.extend(data.get("results", []))
+
         if limit and len(res) >= limit:
             return res[:limit]
+
         if not data.get("has_more"):
             break
+
         cursor = data.get("next_cursor")
         time.sleep(SLEEP)
+
     return res
 
+
 def list_block_children_all(block_id):
-    url = f"https://api.notion.com/v1/blocks/{block_id}/children"
-    res, cursor = [], None
+    url = f"https://api.notion.com/v1/blocks/{hyphenate(block_id)}/children"
+    res = []
+    cursor = None
+
     while True:
         params = {}
+
         if cursor:
             params["start_cursor"] = cursor
+
         data = http_get(url, params=params).json()
         res.extend(data.get("results", []))
+
         if not data.get("has_more"):
             break
+
         cursor = data.get("next_cursor")
         time.sleep(SLEEP)
+
     return res
+
 
 def title_from_page(page):
     for v in (page.get("properties") or {}).values():
         if v.get("type") == "title" and v.get("title"):
             return v["title"][0].get("plain_text", "")
+
     return "(بدون عنوان)"
+
 
 def find_team_db_id_in_project_page(page_id):
     for blk in list_block_children_all(page_id):
         if blk.get("type") == "child_database":
-            if (blk.get("child_database") or {}).get("title","").strip() == TEAM_DB_NAME:
+            title = (blk.get("child_database") or {}).get("title", "").strip()
+
+            if title == TEAM_DB_NAME:
                 return blk.get("id")
+
     return None
+
 
 def score_name(name, keywords):
     return sum(1 for k in keywords if k in (name or "").lower())
 
+
 def detect_team_schema(team_db_id):
     db = retrieve_database(team_db_id)
     props = db.get("properties", {}) or {}
-    people   = [n for n,m in props.items() if m.get("type")=="people"]
-    relation = [n for n,m in props.items() if m.get("type")=="relation"]
-    rollup   = [n for n,m in props.items() if m.get("type")=="rollup"]
-    textlike = [n for n,m in props.items() if m.get("type") in ("rich_text","title")]
-    numbery  = [n for n,m in props.items() if m.get("type") in ("number","formula")]
-    statusy  = [n for n,m in props.items() if m.get("type") in ("select","status","rich_text")]
 
-    emp_key = (max(people, key=lambda n:(score_name(n,EMP_KEYWORDS),len(n))) if people else
-               max(relation,key=lambda n:(score_name(n,EMP_KEYWORDS),len(n))) if relation else
-               max(rollup,  key=lambda n:(score_name(n,EMP_KEYWORDS),len(n))) if rollup else
-               max(textlike,key=lambda n:(score_name(n,EMP_KEYWORDS),len(n))) if textlike else None)
+    people = [n for n, m in props.items() if m.get("type") == "people"]
+    relation = [n for n, m in props.items() if m.get("type") == "relation"]
+    rollup = [n for n, m in props.items() if m.get("type") == "rollup"]
+    textlike = [n for n, m in props.items() if m.get("type") in ("rich_text", "title")]
+    numbery = [n for n, m in props.items() if m.get("type") in ("number", "formula", "rollup")]
+    statusy = [n for n, m in props.items() if m.get("type") in ("select", "status", "rich_text")]
 
-    amt_key = max(numbery, key=lambda n:(score_name(n,AMOUNT_KEYWORDS),len(n))) if numbery else None
-    status_key = max(statusy, key=lambda n:(score_name(n,STATUS_KEYWORDS),len(n))) if statusy else None
+    emp_key = (
+        max(people, key=lambda n: (score_name(n, EMP_KEYWORDS), len(n))) if people else
+        max(relation, key=lambda n: (score_name(n, EMP_KEYWORDS), len(n))) if relation else
+        max(rollup, key=lambda n: (score_name(n, EMP_KEYWORDS), len(n))) if rollup else
+        max(textlike, key=lambda n: (score_name(n, EMP_KEYWORDS), len(n))) if textlike else
+        None
+    )
+
+    amt_key = (
+        max(numbery, key=lambda n: (score_name(n, AMOUNT_KEYWORDS), len(n)))
+        if numbery else None
+    )
+
+    status_key = (
+        max(statusy, key=lambda n: (score_name(n, STATUS_KEYWORDS), len(n)))
+        if statusy else None
+    )
 
     emp_rel_db = None
-    if emp_key and props[emp_key].get("type")=="relation":
+
+    if emp_key and props[emp_key].get("type") == "relation":
         emp_rel_db = (props[emp_key].get("relation") or {}).get("database_id")
 
     return emp_key, amt_key, status_key, db, emp_rel_db
 
+
 def extract_textlike(cell):
-    arr = cell.get(cell.get("type"), [])
+    if not cell:
+        return ""
+
+    t = cell.get("type")
+
+    if t == "title":
+        arr = cell.get("title", [])
+    elif t == "rich_text":
+        arr = cell.get("rich_text", [])
+    else:
+        arr = cell.get(t, [])
+
     return (arr[0].get("plain_text") or "").strip() if arr else ""
 
+
 def extract_amount(prop):
+    if not prop:
+        return 0.0
+
     t = prop.get("type")
-    if t=="number": return float(prop.get("number") or 0)
-    if t=="formula": return float((prop.get("formula") or {}).get("number") or 0)
-    if t=="rollup" and (prop.get("rollup") or {}).get("type")=="number":
-        return float(prop["rollup"].get("number") or 0)
+
+    if t == "number":
+        return float(prop.get("number") or 0)
+
+    if t == "formula":
+        formula = prop.get("formula") or {}
+
+        if formula.get("type") == "number":
+            return float(formula.get("number") or 0)
+
+        return 0.0
+
+    if t == "rollup":
+        rollup = prop.get("rollup") or {}
+
+        if rollup.get("type") == "number":
+            return float(rollup.get("number") or 0)
+
+        if rollup.get("type") == "array":
+            total = 0.0
+
+            for item in rollup.get("array", []):
+                if item.get("type") == "number":
+                    total += float(item.get("number") or 0)
+                elif item.get("type") == "formula":
+                    f = item.get("formula") or {}
+                    if f.get("type") == "number":
+                        total += float(f.get("number") or 0)
+
+            return total
+
     return 0.0
 
+
 def extract_employee_key(prop):
+    if not prop:
+        return ""
+
     t = prop.get("type")
-    if t=="people":
+
+    if t == "people":
         p = prop.get("people", [])
         return (p[0].get("name") or p[0].get("id")) if p else ""
-    if t=="relation":
+
+    if t == "relation":
         r = prop.get("relation", [])
         return r[0].get("id") if r else ""
-    if t in ("title","rich_text"):
+
+    if t == "rollup":
+        rollup = prop.get("rollup") or {}
+
+        if rollup.get("type") == "array":
+            arr = rollup.get("array", [])
+
+            for item in arr:
+                value = extract_employee_key(item)
+                if value:
+                    return value
+
+        return ""
+
+    if t in ("title", "rich_text"):
         return extract_textlike(prop)
+
     return ""
 
+
 def extract_status_label(prop):
-    if prop.get("type") in ("select","status"):
-        return (prop.get(prop["type"]) or {}).get("name","")
+    if not prop:
+        return ""
+
+    t = prop.get("type")
+
+    if t in ("select", "status"):
+        return (prop.get(t) or {}).get("name", "")
+
     return extract_textlike(prop)
 
+
 def is_transferred(label):
-    l = (label or "").lower()
-    if l in TRANSFER_TRUE_VALUES: return True
-    if l in TRANSFER_FALSE_VALUES: return False
+    l = (label or "").strip().lower()
+
+    if l in TRANSFER_TRUE_VALUES:
+        return True
+
+    if l in TRANSFER_FALSE_VALUES:
+        return False
+
     return False
 
-def looks_like_id(s):
-    return bool(re.fullmatch(r"[0-9a-f]{8}-", s or "", re.I))
 
-# ========= بقية المنطق كما هو (Upsert + الربط) =========
-# (لم يتم تغييره إطلاقًا)
+def find_database_by_title(parent_page_id, db_title):
+    for blk in list_block_children_all(parent_page_id):
+        if blk.get("type") == "child_database":
+            title = (blk.get("child_database") or {}).get("title", "").strip()
+
+            if title == db_title:
+                return blk.get("id")
+
+    return None
+
+
+def create_output_database(parent_page_id):
+    body = {
+        "parent": {
+            "type": "page_id",
+            "page_id": hyphenate(parent_page_id)
+        },
+        "title": [
+            {
+                "type": "text",
+                "text": {
+                    "content": OUT_DB_TITLE
+                }
+            }
+        ],
+        "properties": {
+            OUT_EMP_PROP: {
+                "title": {}
+            },
+            OUT_PROJECT_PROP: {
+                "rich_text": {}
+            },
+            OUT_AMOUNT_PROP: {
+                "number": {
+                    "format": "number"
+                }
+            },
+            OUT_STATUS_PROP: {
+                "select": {
+                    "options": [
+                        {
+                            "name": "محول",
+                            "color": "green"
+                        },
+                        {
+                            "name": "غير محول",
+                            "color": "red"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    data = http_post("https://api.notion.com/v1/databases", body).json()
+    return data["id"]
+
+
+def get_or_create_output_db():
+    if OUT_DB_ID_ENV:
+        return hyphenate(OUT_DB_ID_ENV)
+
+    if not OUT_PARENT_ENV:
+        raise ValueError(
+            "🚫 أضف DETAILED_REPORT_DB_ID إذا عندك Database جاهزة، "
+            "أو DETAILED_REPORT_PARENT_PAGE_ID إذا تبي الكود ينشئ Database تلقائيًا."
+        )
+
+    parent_id = hyphenate(OUT_PARENT_ENV)
+
+    existing_db_id = find_database_by_title(parent_id, OUT_DB_TITLE)
+
+    if existing_db_id:
+        return existing_db_id
+
+    return create_output_database(parent_id)
+
+
+def find_existing_report_row(out_db_id, employee_name, project_name):
+    filter_body = {
+        "and": [
+            {
+                "property": OUT_EMP_PROP,
+                "title": {
+                    "equals": str(employee_name)
+                }
+            },
+            {
+                "property": OUT_PROJECT_PROP,
+                "rich_text": {
+                    "equals": str(project_name)
+                }
+            }
+        ]
+    }
+
+    rows = query_database_pages(
+        out_db_id,
+        page_size=1,
+        limit=1,
+        filter_body=filter_body
+    )
+
+    return rows[0]["id"] if rows else None
+
+
+def build_report_properties(employee_name, project_name, amount, status):
+    return {
+        OUT_EMP_PROP: {
+            "title": [
+                {
+                    "type": "text",
+                    "text": {
+                        "content": str(employee_name)
+                    }
+                }
+            ]
+        },
+        OUT_PROJECT_PROP: {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {
+                        "content": str(project_name)
+                    }
+                }
+            ]
+        },
+        OUT_AMOUNT_PROP: {
+            "number": float(amount or 0)
+        },
+        OUT_STATUS_PROP: {
+            "select": {
+                "name": status
+            }
+        }
+    }
+
+
+def create_report_row(out_db_id, employee_name, project_name, amount, status):
+    body = {
+        "parent": {
+            "database_id": hyphenate(out_db_id)
+        },
+        "properties": build_report_properties(
+            employee_name=employee_name,
+            project_name=project_name,
+            amount=amount,
+            status=status
+        )
+    }
+
+    return http_post("https://api.notion.com/v1/pages", body).json()
+
+
+def update_report_row(page_id, employee_name, project_name, amount, status):
+    body = {
+        "properties": build_report_properties(
+            employee_name=employee_name,
+            project_name=project_name,
+            amount=amount,
+            status=status
+        )
+    }
+
+    return http_patch(
+        f"https://api.notion.com/v1/pages/{hyphenate(page_id)}",
+        body
+    ).json()
+
+
+def upsert_report_row(out_db_id, employee_name, project_name, amount, status):
+    existing_page_id = find_existing_report_row(
+        out_db_id=out_db_id,
+        employee_name=employee_name,
+        project_name=project_name
+    )
+
+    if existing_page_id:
+        update_report_row(
+            page_id=existing_page_id,
+            employee_name=employee_name,
+            project_name=project_name,
+            amount=amount,
+            status=status
+        )
+        return "updated"
+
+    create_report_row(
+        out_db_id=out_db_id,
+        employee_name=employee_name,
+        project_name=project_name,
+        amount=amount,
+        status=status
+    )
+
+    return "created"
+
 
 def generate_detailed_report():
-    projects = query_database_pages(PROJECTS_DB_ID, limit=MAX_PROJECTS)
-    print(f"📦 عدد المشاريع: {len(projects)}")
+    out_db_id = get_or_create_output_db()
 
-    for idx, page in enumerate(projects,1):
+    projects = query_database_pages(PROJECTS_DB_ID, limit=MAX_PROJECTS)
+
+    print("⏳ إنشاء/تحديث التقرير التفصيلي...")
+    print(f"📦 عدد المشاريع: {len(projects)}")
+    print(f"📝 قاعدة التقرير: {out_db_id}")
+
+    created_count = 0
+    updated_count = 0
+    skipped_count = 0
+
+    for idx, page in enumerate(projects, 1):
         pid = page["id"]
-        print(f"\n[{idx}] {title_from_page(page)}")
+        project_name = title_from_page(page)
+
+        print(f"\n[{idx}] {project_name}")
 
         team_db_id = find_team_db_id_in_project_page(pid)
+
         if not team_db_id:
             print("  ⚠️ لا يوجد جدول فريق المشروع")
+            skipped_count += 1
             continue
 
         emp_key, amt_key, status_key, *_ = detect_team_schema(team_db_id)
+
+        if not emp_key:
+            print("  ⚠️ لم يتم العثور على عمود الموظف")
+            skipped_count += 1
+            continue
+
+        if not amt_key:
+            print("  ⚠️ لم يتم العثور على عمود المبلغ")
+            skipped_count += 1
+            continue
+
         rows = query_database_pages(team_db_id)
         print(f"  👥 صفوف الفريق: {len(rows)}")
+        print(f"  🧩 عمود الموظف: {emp_key}")
+        print(f"  🧩 عمود المبلغ: {amt_key}")
+        print(f"  🧩 عمود حالة التحويل: {status_key or 'غير موجود'}")
 
         for r in rows:
             props = r.get("properties", {})
-            emp = extract_employee_key(props.get(emp_key,{}))
-            if not emp: continue
-            amt = extract_amount(props.get(amt_key,{}))
-            status = "محول" if status_key and is_transferred(extract_status_label(props[status_key])) else "غير محول"
-            print(f"    ✓ {emp} | {amt} | {status}")
+
+            employee_name = extract_employee_key(props.get(emp_key, {}))
+
+            if not employee_name:
+                skipped_count += 1
+                continue
+
+            amount = extract_amount(props.get(amt_key, {}))
+
+            if status_key and status_key in props:
+                raw_status = extract_status_label(props[status_key])
+                status = "محول" if is_transferred(raw_status) else "غير محول"
+            else:
+                status = "غير محول"
+
+            action = upsert_report_row(
+                out_db_id=out_db_id,
+                employee_name=employee_name,
+                project_name=project_name,
+                amount=amount,
+                status=status
+            )
+
+            if action == "created":
+                created_count += 1
+            else:
+                updated_count += 1
+
+            print(
+                f"    ✓ {employee_name} | {project_name} | "
+                f"{amount} | {status} | {action}"
+            )
+
             time.sleep(SLEEP)
 
+    print("\n✅ تم الانتهاء من تحديث التقرير التفصيلي")
+    print(f"🟢 سجلات جديدة: {created_count}")
+    print(f"🟡 سجلات محدثة: {updated_count}")
+    print(f"⚠️ سجلات متجاوزة: {skipped_count}")
+
+
 if __name__ == "__main__":
-    print("⏳ إنشاء التقرير التفصيلي…")
     generate_detailed_report()
